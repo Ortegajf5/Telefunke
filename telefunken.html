@@ -1,0 +1,795 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<title>Control de Jugadas · Telefunken</title>
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Telefunken">
+<meta name="theme-color" content="#0e3329">
+<link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%230e3329'/%3E%3Ctext x='50' y='63' font-size='46' text-anchor='middle' fill='%23d9a441' font-family='Georgia, serif' font-weight='bold'%3E%E2%99%A3%3C/text%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%230e3329'/%3E%3Ctext x='50' y='63' font-size='46' text-anchor='middle' fill='%23d9a441' font-family='Georgia, serif' font-weight='bold'%3E%E2%99%A3%3C/text%3E%3C/svg%3E">
+<style>
+  :root{
+    --felt-900:#0e3329;
+    --felt-800:#144639;
+    --felt-700:#1b5c4a;
+    --cream:#faf3e3;
+    --cream-dim:#efe4c8;
+    --ink:#1c231f;
+    --gold:#d9a441;
+    --gold-dim:#8a6a2c;
+    --brick:#b8452f;
+    --brick-dim:#7a2f21;
+    --ok:#4f8f63;
+    --radius:16px;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:
+      radial-gradient(1200px 600px at 50% -10%, var(--felt-700), var(--felt-900) 60%);
+    color:var(--cream);
+    font-family:system-ui, -apple-system, 'Segoe UI', sans-serif;
+    min-height:100vh;
+    padding-bottom:48px;
+    padding-top: env(safe-area-inset-top);
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
+  .wrap{max-width:640px;margin:0 auto;padding:18px 14px 8px;}
+
+  h1,h2,h3{font-family:ui-rounded, 'Segoe UI', system-ui, sans-serif;margin:0;}
+  .title-row{display:flex;align-items:baseline;gap:10px;justify-content:space-between;}
+  .title-row h1{font-size:26px;color:var(--cream);letter-spacing:.2px;}
+  .title-row .suit{font-size:22px;opacity:.8;}
+  .subtitle{color:var(--cream-dim);font-size:13px;margin-top:2px;}
+
+  .card{
+    background:rgba(250,243,227,0.06);
+    border:1px solid rgba(250,243,227,0.14);
+    border-radius:var(--radius);
+    padding:14px;
+    margin-top:14px;
+  }
+
+  /* Legend */
+  .legend-toggle{
+    display:flex;align-items:center;justify-content:space-between;
+    cursor:pointer;user-select:none;
+  }
+  .legend-toggle h2{font-size:16px;}
+  .chev{transition:transform .2s ease;color:var(--gold);font-size:14px;}
+  .chev.open{transform:rotate(180deg);}
+  .legend-body{display:none;margin-top:12px;}
+  .legend-body.open{display:block;}
+  .chip-row{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px;}
+  .chip{
+    background:var(--cream);color:var(--ink);
+    border-radius:999px;padding:6px 12px;font-weight:700;font-size:13px;
+    display:flex;gap:6px;align-items:center;
+  }
+  .chip .pts{color:var(--felt-800);font-weight:800;}
+  .chip.special.gold{background:var(--gold);}
+  .chip.special.brick{background:var(--brick);color:var(--cream);}
+  .chip.special.brick .pts{color:var(--cream);}
+
+  /* Players */
+  .player-add{display:flex;gap:8px;}
+  input[type=text], input[type=number]{
+    font-family:inherit;
+    background:var(--cream);
+    color:var(--ink);
+    border:none;border-radius:12px;
+    padding:11px 12px;font-size:15px;font-weight:600;
+    outline:none;
+  }
+  input[type=text]{flex:1;min-width:0;}
+  .btn{
+    font-family:ui-rounded, 'Segoe UI', system-ui, sans-serif;
+    border:none;border-radius:12px;
+    padding:11px 16px;font-size:15px;font-weight:600;
+    cursor:pointer;letter-spacing:.2px;
+  }
+  .btn-gold{background:var(--gold);color:var(--felt-900);}
+  .btn-outline{background:transparent;color:var(--cream);border:1px solid rgba(250,243,227,0.35);}
+  .btn-brick{background:var(--brick);color:var(--cream);}
+  .btn:active{transform:scale(0.97);}
+  .btn:disabled{opacity:.4;cursor:not-allowed;}
+
+  .player-list{margin-top:10px;display:flex;flex-direction:column;gap:8px;}
+  .player-chip{
+    display:flex;align-items:center;justify-content:space-between;
+    background:rgba(250,243,227,0.08);
+    border-radius:12px;padding:9px 12px;
+  }
+  .player-chip .name{font-weight:700;}
+  .player-chip button{
+    background:none;border:none;color:var(--brick);
+    font-size:18px;line-height:1;cursor:pointer;padding:2px 6px;
+  }
+
+  /* Rounds tabs */
+  .rounds-scroll{display:flex;gap:8px;overflow-x:auto;padding-bottom:4px;-webkit-overflow-scrolling:touch;}
+  .round-tab{
+    flex:0 0 auto;
+    background:rgba(250,243,227,0.08);
+    border:1px solid transparent;
+    color:var(--cream-dim);
+    border-radius:12px;padding:9px 14px;font-weight:700;font-size:14px;
+    cursor:pointer;white-space:nowrap;
+  }
+  .round-tab.active{background:var(--gold);color:var(--felt-900);border-color:var(--gold);}
+  .round-add{
+    flex:0 0 auto;background:transparent;border:1px dashed rgba(250,243,227,0.4);
+    color:var(--cream-dim);border-radius:12px;padding:9px 12px;font-weight:700;cursor:pointer;
+  }
+
+  /* Round entry */
+  .round-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;}
+  .round-head h2{font-size:17px;}
+  .round-head .rm-round{background:none;border:none;color:var(--brick);font-size:12px;font-weight:700;cursor:pointer;}
+
+  .player-score-row{
+    display:flex;align-items:center;justify-content:space-between;
+    padding:10px 4px;border-top:1px solid rgba(250,243,227,0.1);
+  }
+  .player-score-row:first-of-type{border-top:none;}
+  .player-score-row .pname{font-weight:700;flex:1;}
+  .player-score-row .pscore{
+    font-family:ui-rounded, 'Segoe UI', system-ui, sans-serif; font-weight:800;font-size:18px;min-width:52px;text-align:right;margin-right:10px;
+  }
+  .player-score-row .pscore.empty{color:var(--cream-dim);font-size:13px;font-weight:400;font-family:inherit;}
+  .player-score-row .edit-btn{
+    background:rgba(250,243,227,0.12);border:none;color:var(--cream);
+    border-radius:10px;padding:7px 12px;font-size:13px;font-weight:700;cursor:pointer;
+  }
+
+  /* Calculator panel */
+  .calc{
+    margin-top:8px;background:var(--felt-800);
+    border:1px solid rgba(250,243,227,0.16);
+    border-radius:14px;padding:14px;
+  }
+  .calc h3{font-size:15px;margin-bottom:10px;}
+  .calc-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;}
+  .calc-btn{
+    background:var(--cream);color:var(--ink);
+    border-radius:12px;padding:12px 6px;text-align:center;cursor:pointer;
+    border:2px solid transparent;
+  }
+  .calc-btn .lbl{font-weight:800;font-size:14px;}
+  .calc-btn .val{font-size:11px;color:var(--felt-800);font-weight:700;}
+  .calc-btn .count{
+    display:block;margin-top:4px;font-family:ui-rounded, 'Segoe UI', system-ui, sans-serif; font-weight:800;font-size:15px;color:var(--brick);
+  }
+  .calc-special{margin-top:10px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;}
+  .calc-special .calc-btn.mono{background:var(--gold);}
+  .calc-special .calc-btn.pen{background:var(--brick);color:var(--cream);}
+  .calc-special .calc-btn.pen .val{color:var(--cream);}
+  .calc-special .calc-btn.pen .count{color:var(--cream);}
+
+  .calc-total{
+    display:flex;align-items:center;justify-content:space-between;
+    margin-top:12px;padding-top:10px;border-top:1px dashed rgba(250,243,227,0.25);
+  }
+  .calc-total .lbl{font-weight:700;color:var(--cream-dim);font-size:13px;}
+  .calc-total .num{font-family:ui-rounded, 'Segoe UI', system-ui, sans-serif; font-weight:800;font-size:26px;color:var(--gold);}
+  .calc-manual{display:flex;align-items:center;gap:8px;margin-top:8px;}
+  .calc-manual label{font-size:12px;color:var(--cream-dim);flex:1;}
+  .calc-manual input{width:80px;text-align:right;}
+  .calc-actions{display:flex;gap:8px;margin-top:12px;}
+  .calc-actions .btn{flex:1;}
+
+  /* Table */
+  table.score-table{width:100%;border-collapse:collapse;margin-top:6px;font-size:13px;}
+  table.score-table th, table.score-table td{
+    padding:8px 6px;text-align:center;white-space:nowrap;
+  }
+  table.score-table th{color:var(--cream-dim);font-weight:700;border-bottom:1px solid rgba(250,243,227,0.2);}
+  table.score-table td.rowlabel, table.score-table th.rowlabel{
+    text-align:left;font-weight:700;color:var(--cream);position:sticky;left:0;
+  }
+  table.score-table tr.total-row td{
+    font-family:ui-rounded, 'Segoe UI', system-ui, sans-serif; font-weight:800;font-size:15px;border-top:2px solid var(--gold);color:var(--gold);padding-top:10px;
+  }
+  .table-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;}
+  .leader-tag{display:inline-block;margin-left:4px;font-size:12px;}
+
+  .empty-state{color:var(--cream-dim);font-size:14px;text-align:center;padding:14px 4px;}
+  .footer-actions{display:flex;justify-content:center;margin-top:22px;}
+  .link-btn{background:none;border:none;color:var(--cream-dim);font-size:13px;text-decoration:underline;cursor:pointer;}
+</style>
+</head>
+<body>
+<div class="wrap" id="app"></div>
+
+<script>
+const STORAGE_KEY = 'telefunken_state_v1';
+const DEFAULT_ROUNDS = ['1T','2T (1L)','1C (L)','2C (1L)','1Q','2Q (C)','ESCA (C)'];
+const ROUND_DESCRIPTIONS = {
+  '1T': '1 trío',
+  '2T (1L)': '2 tríos (uno debe ser limpio)',
+  '1C (L)': '1 cuarteto (limpio)',
+  '2C (1L)': '2 cuartetos (uno debe ser limpio)',
+  '1Q': '1 quinteto',
+  '2Q (C)': '2 quintetos (con cambalache)',
+  'ESCA (C)': 'escalera seguidilla (con cambalache)',
+};
+
+let state = {
+  players: [],          // [{id,name}]
+  rounds: DEFAULT_ROUNDS.map(name => ({id: cryptoId(), name})),
+  scores: {},           // scores[roundId][playerId] = number
+  activeRoundId: null,
+  legendOpen: false,
+  shareOpen: false,
+  importText: '',
+  history: [],           // [{id,name,date,players,rounds,scores}]
+};
+
+let calcOpenFor = null;   // {roundId, playerId}
+let calcCounts = {low:0, mid:0, high:0};
+let calcSpecials = {mono:0, picadas:0, relancino:0};
+let calcManual = null;    // manual override for CARD points only (not specials)
+
+function cryptoId(){
+  return 'id' + Math.random().toString(36).slice(2,10);
+}
+
+async function loadState(){
+  try{
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if(raw){
+      const parsed = JSON.parse(raw);
+      state = Object.assign(state, parsed);
+    }
+    if(!state.activeRoundId && state.rounds.length){
+      state.activeRoundId = state.rounds[0].id;
+    }
+  }catch(e){
+    if(state.rounds.length) state.activeRoundId = state.rounds[0].id;
+  }
+  render();
+}
+
+async function saveState(){
+  try{
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  }catch(e){
+    console.error('No se pudo guardar', e);
+  }
+}
+
+function cardValue(kind){
+  if(kind==='low') return 5;
+  if(kind==='mid') return 10;
+  if(kind==='high') return 15;
+  if(kind==='mono') return 50;
+  if(kind==='picadas') return -50;
+  if(kind==='relancino') return -50;
+  return 0;
+}
+
+function cardPoints(){
+  if(calcManual !== null && calcManual !== '') return Number(calcManual);
+  return calcCounts.low*5 + calcCounts.mid*10 + calcCounts.high*15;
+}
+
+function specialPoints(){
+  return calcSpecials.mono*50 + calcSpecials.picadas*(-50) + calcSpecials.relancino*(-50);
+}
+
+function calcSubtotal(){
+  return cardPoints() + specialPoints();
+}
+
+function openCalc(roundId, playerId){
+  calcOpenFor = {roundId, playerId};
+  const existing = (state.scores[roundId] || {})[playerId];
+  calcCounts = {low:0, mid:0, high:0};
+  calcSpecials = {mono:0, picadas:0, relancino:0};
+  calcManual = (existing !== undefined && existing !== null) ? String(existing) : null;
+  render();
+}
+
+function closeCalc(){
+  calcOpenFor = null;
+  render();
+}
+
+function bump(kind, delta){
+  if(kind==='low' || kind==='mid' || kind==='high'){
+    calcManual = null; // escribir/tocar cartas usa un solo modo para las cartas
+    calcCounts[kind] = Math.max(0, (calcCounts[kind]||0) + delta);
+  } else {
+    // mono / picadas / relancino: siempre se suman aparte, nunca borran las cartas
+    calcSpecials[kind] = Math.max(0, (calcSpecials[kind]||0) + delta);
+  }
+  render();
+}
+
+function setManual(v){
+  calcManual = v;
+}
+
+function saveCalc(){
+  const {roundId, playerId} = calcOpenFor;
+  if(!state.scores[roundId]) state.scores[roundId] = {};
+  state.scores[roundId][playerId] = calcSubtotal();
+  calcOpenFor = null;
+  saveState();
+  render();
+}
+
+function addPlayer(name){
+  name = (name||'').trim();
+  if(!name) return;
+  state.players.push({id: cryptoId(), name});
+  saveState();
+  render();
+}
+
+function removePlayer(id){
+  state.players = state.players.filter(p=>p.id!==id);
+  Object.keys(state.scores).forEach(rid=>{
+    if(state.scores[rid]) delete state.scores[rid][id];
+  });
+  saveState();
+  render();
+}
+
+function addRound(){
+  const name = prompt('Nombre de la jugada (ej: 3T, ESCA REAL)');
+  if(!name || !name.trim()) return;
+  const r = {id: cryptoId(), name: name.trim()};
+  state.rounds.push(r);
+  state.activeRoundId = r.id;
+  saveState();
+  render();
+}
+
+function removeRound(id){
+  if(!confirm('¿Eliminar esta jugada y sus puntos?')) return;
+  state.rounds = state.rounds.filter(r=>r.id!==id);
+  delete state.scores[id];
+  if(state.activeRoundId===id){
+    state.activeRoundId = state.rounds.length ? state.rounds[0].id : null;
+  }
+  saveState();
+  render();
+}
+
+function setActiveRound(id){
+  state.activeRoundId = id;
+  render();
+}
+
+function totalsByPlayer(){
+  const totals = {};
+  state.players.forEach(p=> totals[p.id]=0);
+  state.rounds.forEach(r=>{
+    const rs = state.scores[r.id] || {};
+    state.players.forEach(p=>{
+      totals[p.id] += Number(rs[p.id] || 0);
+    });
+  });
+  return totals;
+}
+
+async function newGame(){
+  const hasAnyScore = Object.keys(state.scores).some(rid => Object.keys(state.scores[rid]||{}).length>0);
+  if(hasAnyScore && state.players.length){
+    const defaultName = 'Partida ' + (state.history.length + 1);
+    state.history.unshift({
+      id: cryptoId(),
+      name: defaultName,
+      date: new Date().toISOString(),
+      players: JSON.parse(JSON.stringify(state.players)),
+      rounds: JSON.parse(JSON.stringify(state.rounds)),
+      scores: JSON.parse(JSON.stringify(state.scores)),
+    });
+  }
+  state.scores = {};
+  state.activeRoundId = state.rounds.length ? state.rounds[0].id : null;
+  saveState();
+  render();
+}
+
+function renameHistoryName(id, newName){
+  const h = state.history.find(x=>x.id===id);
+  if(h) h.name = newName;
+  saveState();
+}
+
+function deleteHistoryItem(id){
+  if(!confirm('¿Borrar esta partida del historial?')) return;
+  state.history = state.history.filter(x=>x.id!==id);
+  saveState();
+  render();
+}
+
+function gameTotals(game){
+  const totals = {};
+  game.players.forEach(p=> totals[p.id]=0);
+  game.rounds.forEach(r=>{
+    const rs = game.scores[r.id]||{};
+    game.players.forEach(p=>{ totals[p.id] += Number(rs[p.id]||0); });
+  });
+  return totals;
+}
+
+function computeStats(){
+  const map = {};
+  state.history.forEach(g=>{
+    const totals = gameTotals(g);
+    if(!g.players.length) return;
+    let minTotal = Infinity;
+    g.players.forEach(p=>{ if(totals[p.id]<minTotal) minTotal=totals[p.id]; });
+    g.players.forEach(p=>{
+      const name = p.name;
+      if(!map[name]) map[name] = {games:0, wins:0, sum:0, best:Infinity, worst:-Infinity};
+      const d = map[name];
+      const t = totals[p.id];
+      d.games++;
+      d.sum += t;
+      if(t===minTotal) d.wins++;
+      if(t<d.best) d.best=t;
+      if(t>d.worst) d.worst=t;
+    });
+  });
+  return Object.entries(map).map(([name,d])=>({
+    name, games:d.games, wins:d.wins, avg: Math.round(d.sum/d.games), best:d.best, worst:d.worst
+  }));
+}
+
+async function resetAll(){
+  if(!confirm('¿Borrar TODO: jugadores, jugadas, puntos e historial?')) return;
+  state = {
+    players: [],
+    rounds: DEFAULT_ROUNDS.map(name => ({id: cryptoId(), name})),
+    scores: {},
+    activeRoundId: null,
+    legendOpen: false,
+    shareOpen: false,
+    importText: '',
+    history: [],
+  };
+  state.activeRoundId = state.rounds[0].id;
+  await saveState();
+  render();
+}
+
+function toggleLegend(){
+  state.legendOpen = !state.legendOpen;
+  render();
+}
+
+function toggleShare(){
+  state.shareOpen = !state.shareOpen;
+  state.importText = '';
+  render();
+}
+
+function exportText(){
+  return btoa(unescape(encodeURIComponent(JSON.stringify(state))));
+}
+
+function copyExport(){
+  const ta = document.getElementById('export-box');
+  ta.select();
+  ta.setSelectionRange(0, 99999);
+  try{
+    document.execCommand('copy');
+    const btn = document.getElementById('copy-export-btn');
+    if(btn){ btn.textContent = '¡Copiado!'; setTimeout(()=>{btn.textContent='Copiar';},1500); }
+  }catch(e){}
+}
+
+function setImportText(v){
+  state.importText = v;
+}
+
+function importData(){
+  try{
+    const txt = (state.importText||'').trim();
+    if(!txt) return;
+    const decoded = decodeURIComponent(escape(atob(txt)));
+    const parsed = JSON.parse(decoded);
+    if(!parsed.players || !parsed.rounds){ alert('El código no parece válido.'); return; }
+    if(!confirm('Esto reemplazará los datos de este dispositivo por los importados. ¿Continuar?')) return;
+    state = parsed;
+    state.shareOpen = false;
+    state.importText = '';
+    saveState();
+    render();
+  }catch(e){
+    alert('No se pudo leer ese código. Revisa que lo hayas copiado completo.');
+  }
+}
+
+function esc(s){
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function render(){
+  const app = document.getElementById('app');
+  const totals = totalsByPlayer();
+  const sortedTotals = state.players.map(p=>({...p, total: totals[p.id]||0}))
+    .sort((a,b)=> a.total-b.total); // en Telefunken menos puntos = mejor
+  const leaderId = state.players.length ? sortedTotals[0].id : null;
+
+  let html = '';
+
+  html += `
+  <div class="title-row">
+    <div>
+      <h1>Control de Jugadas <span class="suit">♣</span></h1>
+      <div class="subtitle">Telefunken · anota, suma y no discutas más los puntos</div>
+    </div>
+  </div>`;
+
+  // Legend
+  html += `
+  <div class="card">
+    <div class="legend-toggle" onclick="toggleLegend()">
+      <h2>Valor de las cartas</h2>
+      <span class="chev ${state.legendOpen?'open':''}">▾</span>
+    </div>
+    <div class="legend-body ${state.legendOpen?'open':''}">
+      <div class="chip-row">
+        <span class="chip">2 al 9 <span class="pts">5 pts</span></span>
+        <span class="chip">10, J, Q, K <span class="pts">10 pts</span></span>
+        <span class="chip">As <span class="pts">15 pts</span></span>
+      </div>
+      <div class="chip-row">
+        <span class="chip special gold">MONO <span class="pts">+50</span></span>
+        <span class="chip special brick">PICADAS <span class="pts">-50</span></span>
+        <span class="chip special brick">RELANCINO <span class="pts">-50</span></span>
+      </div>
+      <div class="subtitle" style="line-height:1.5;">
+        PICADAS y RELANCINO se suman con lo que le quedó en la mano al jugador,
+        no la reemplazan. Ej: PICADAS -50 + 30 pts de cartas = -20 en esa jugada.
+        También puede pasar que se pique y no gane: -50 + 175 pts de cartas
+        que le quedaron = 125 en esa jugada.<br>
+        RELANCINO es del jugador que ganó sin que nadie más bajara nada: anota
+        solo el -50, sin cartas. Los demás anotan lo que les quedó, normal.<br><br>
+        <b>Jugadas:</b> T = trío, C = cuarteto, Q = quinteto, ESCA = escalera
+        seguidilla. (L) = una de las combinaciones debe ser limpia. (C) = cambalache,
+        permite intercambio de cartas en esa jugada.<br><br>
+        <b>Mazo:</b> cartas de póker. LIMPIO = mismo número, distinta figura (palo),
+        sin comodín — aplica a tríos y cuartetos. La escalera debe ser de la misma
+        figura, mínimo 7 cartas, puede llevar un MONO (comodín), y va de un extremo
+        al otro sin dar la vuelta: válido A-2-3-4-5-6-7 u 8-9-10-J-Q-K-A; nunca
+        J-Q-K-A-2-3-4.
+      </div>
+    </div>
+  </div>`;
+
+  // Players
+  html += `
+  <div class="card">
+    <h2 style="font-size:16px;margin-bottom:10px;">Jugadores</h2>
+    <div class="player-add">
+      <input type="text" id="new-player-name" placeholder="Nombre del jugador" onkeydown="if(event.key==='Enter'){addPlayer(this.value);this.value='';}">
+      <button class="btn btn-gold" onclick="const i=document.getElementById('new-player-name'); addPlayer(i.value); i.value='';">Añadir</button>
+    </div>
+    <div class="player-list">`;
+  if(state.players.length===0){
+    html += `<div class="empty-state">Agrega al menos 2 jugadores para empezar.</div>`;
+  } else {
+    state.players.forEach(p=>{
+      html += `
+      <div class="player-chip">
+        <span class="name">${esc(p.name)}</span>
+        <button onclick="removePlayer('${p.id}')" title="Quitar">✕</button>
+      </div>`;
+    });
+  }
+  html += `</div></div>`;
+
+  // Rounds + entry
+  if(state.players.length >= 1 && state.rounds.length){
+    html += `<div class="card">`;
+    html += `<h2 style="font-size:16px;margin-bottom:10px;">Jugadas</h2>`;
+    html += `<div class="rounds-scroll">`;
+    state.rounds.forEach(r=>{
+      html += `<div class="round-tab ${r.id===state.activeRoundId?'active':''}" onclick="setActiveRound('${r.id}')">${esc(r.name)}</div>`;
+    });
+    html += `<div class="round-add" onclick="addRound()">+ jugada</div>`;
+    html += `</div>`;
+
+    const activeRound = state.rounds.find(r=>r.id===state.activeRoundId);
+    if(activeRound){
+      const desc = ROUND_DESCRIPTIONS[activeRound.name];
+      html += `
+      <div class="round-head" style="margin-top:14px;">
+        <div>
+          <h2>${esc(activeRound.name)}</h2>
+          ${desc?`<div class="subtitle">${esc(desc)}</div>`:''}
+        </div>
+        <button class="rm-round" onclick="removeRound('${activeRound.id}')">eliminar jugada</button>
+      </div>`;
+
+      const rs = state.scores[activeRound.id] || {};
+      state.players.forEach(p=>{
+        const val = rs[p.id];
+        const isOpen = calcOpenFor && calcOpenFor.roundId===activeRound.id && calcOpenFor.playerId===p.id;
+        html += `
+        <div class="player-score-row">
+          <span class="pname">${esc(p.name)}</span>
+          <span class="pscore ${val===undefined?'empty':''}">${val===undefined?'sin anotar':val}</span>
+          <button class="edit-btn" onclick="${isOpen?'closeCalc()':`openCalc('${activeRound.id}','${p.id}')`}">${isOpen?'cerrar':(val===undefined?'anotar':'editar')}</button>
+        </div>`;
+        if(isOpen){
+          html += renderCalc();
+        }
+      });
+
+      const allDone = state.players.length>0 && state.players.every(p => rs[p.id] !== undefined);
+      const idx = state.rounds.findIndex(r=>r.id===activeRound.id);
+      const next = state.rounds[idx+1];
+      if(allDone && next && !calcOpenFor){
+        html += `
+        <div style="margin-top:12px;display:flex;justify-content:flex-end;">
+          <button class="btn btn-gold" onclick="setActiveRound('${next.id}')">Siguiente jugada: ${esc(next.name)} ▶</button>
+        </div>`;
+      } else if(allDone && !next && !calcOpenFor){
+        html += `<div class="subtitle" style="margin-top:12px;text-align:right;">Última jugada anotada ✓</div>`;
+      }
+    }
+    html += `</div>`;
+  }
+
+  // Table + leaderboard
+  if(state.players.length>=1 && state.rounds.length){
+    html += `<div class="card">`;
+    html += `<h2 style="font-size:16px;margin-bottom:10px;">Marcador</h2>`;
+    html += `<div class="table-scroll"><table class="score-table"><thead><tr><th class="rowlabel">Jugada</th>`;
+    state.players.forEach(p=> html += `<th>${esc(p.name)}</th>`);
+    html += `</tr></thead><tbody>`;
+    state.rounds.forEach(r=>{
+      html += `<tr><td class="rowlabel">${esc(r.name)}</td>`;
+      state.players.forEach(p=>{
+        const v = (state.scores[r.id]||{})[p.id];
+        html += `<td>${v===undefined?'–':v}</td>`;
+      });
+      html += `</tr>`;
+    });
+    html += `<tr class="total-row"><td class="rowlabel">TOTAL</td>`;
+    state.players.forEach(p=>{
+      const isLeader = p.id===leaderId && state.players.length>1;
+      html += `<td>${totals[p.id]||0}${isLeader?'<span class="leader-tag">👑</span>':''}</td>`;
+    });
+    html += `</tr></tbody></table></div>`;
+    html += `<div class="subtitle" style="margin-top:8px;">Menos puntos acumulados = mejor posición.</div>`;
+    html += `</div>`;
+  }
+
+  // Historial de partidas guardadas
+  if(state.history.length){
+    html += `<div class="card"><h2 style="font-size:16px;margin-bottom:6px;">Historial de partidas</h2>
+      <div class="subtitle" style="margin-bottom:6px;">Cada vez que tocas "Nueva partida", la anterior queda guardada aquí. Toca el nombre para cambiarlo.</div>`;
+    state.history.forEach(g=>{
+      const totals = gameTotals(g);
+      const dateStr = new Date(g.date).toLocaleDateString('es', {day:'2-digit',month:'2-digit',year:'2-digit'});
+      const ranked = g.players.slice().sort((a,b)=> totals[a.id]-totals[b.id]);
+      html += `
+      <div style="padding:10px 0;border-top:1px solid rgba(250,243,227,0.12);">
+        <div style="display:flex;gap:8px;align-items:center;">
+          <input type="text" value="${esc(g.name)}" oninput="renameHistoryName('${g.id}', this.value)" style="flex:1;">
+          <span class="subtitle" style="white-space:nowrap;">${dateStr}</span>
+          <button onclick="deleteHistoryItem('${g.id}')" style="background:none;border:none;color:var(--brick);font-size:16px;cursor:pointer;padding:2px 4px;">✕</button>
+        </div>
+        <div class="chip-row" style="margin-top:8px;">`;
+      ranked.forEach((p,i)=>{
+        html += `<span class="chip">${i===0?'👑 ':''}${esc(p.name)} <span class="pts">${totals[p.id]||0}</span></span>`;
+      });
+      html += `</div></div>`;
+    });
+    html += `</div>`;
+
+    const stats = computeStats();
+    if(stats.length){
+      stats.sort((a,b)=> b.wins-a.wins || a.avg-b.avg);
+      html += `<div class="card"><h2 style="font-size:16px;margin-bottom:10px;">Estadísticas</h2>
+      <div class="table-scroll"><table class="score-table"><thead><tr>
+        <th class="rowlabel">Jugador</th><th>Partidas</th><th>Ganadas</th><th>Prom.</th><th>Mejor</th><th>Peor</th>
+      </tr></thead><tbody>`;
+      stats.forEach(s=>{
+        html += `<tr><td class="rowlabel">${esc(s.name)}</td><td>${s.games}</td><td>${s.wins}</td><td>${s.avg}</td><td>${s.best}</td><td>${s.worst}</td></tr>`;
+      });
+      html += `</tbody></table></div>
+      <div class="subtitle" style="margin-top:8px;">"Ganadas" = veces que tuvo el total más bajo en esa partida.</div>
+      </div>`;
+    }
+  }
+
+  html += `
+  <div class="footer-actions" style="flex-direction:column;gap:10px;">
+    <div style="display:flex;gap:8px;">
+      <button class="btn btn-outline" onclick="newGame()">Nueva partida</button>
+      <button class="btn btn-outline" onclick="resetAll()">Borrar todo</button>
+    </div>
+    <button class="link-btn" onclick="toggleShare()">${state.shareOpen?'ocultar':'📲 pasar datos a otro dispositivo'}</button>
+  </div>`;
+
+  if(state.shareOpen){
+    html += `
+    <div class="card">
+      <h2 style="font-size:15px;margin-bottom:6px;">Exportar (en este teléfono)</h2>
+      <div class="subtitle" style="margin-bottom:8px;">Copia este código y pégalo en el otro dispositivo.</div>
+      <textarea id="export-box" readonly style="width:100%;height:70px;border-radius:10px;border:none;padding:8px;font-size:11px;background:var(--cream);color:var(--ink);font-family:monospace;">${exportText()}</textarea>
+      <div style="margin-top:8px;"><button class="btn btn-gold" id="copy-export-btn" onclick="copyExport()">Copiar</button></div>
+
+      <h2 style="font-size:15px;margin:16px 0 6px;">Importar (en el otro teléfono)</h2>
+      <div class="subtitle" style="margin-bottom:8px;">Pega aquí el código copiado desde el primer teléfono.</div>
+      <textarea placeholder="Pega el código aquí" oninput="setImportText(this.value)" style="width:100%;height:70px;border-radius:10px;border:none;padding:8px;font-size:11px;background:var(--cream);color:var(--ink);font-family:monospace;">${state.importText||''}</textarea>
+      <div style="margin-top:8px;"><button class="btn btn-brick" onclick="importData()">Cargar en este dispositivo</button></div>
+    </div>`;
+  }
+
+  app.innerHTML = html;
+}
+
+function renderCalc(){
+  const cp = cardPoints();
+  const sp = specialPoints();
+  const subtotal = cp + sp;
+  return `
+  <div class="calc">
+    <h3>Cartas que le quedaron en la mano</h3>
+    <div class="calc-grid">
+      <div class="calc-btn" onclick="bump('low',1)" oncontextmenu="event.preventDefault();bump('low',-1);">
+        <div class="lbl">2–9</div><div class="val">5 pts c/u</div>
+        <span class="count">${calcCounts.low}</span>
+      </div>
+      <div class="calc-btn" onclick="bump('mid',1)" oncontextmenu="event.preventDefault();bump('mid',-1);">
+        <div class="lbl">10 J Q K</div><div class="val">10 pts c/u</div>
+        <span class="count">${calcCounts.mid}</span>
+      </div>
+      <div class="calc-btn" onclick="bump('high',1)" oncontextmenu="event.preventDefault();bump('high',-1);">
+        <div class="lbl">As</div><div class="val">15 pts c/u</div>
+        <span class="count">${calcCounts.high}</span>
+      </div>
+    </div>
+    <div class="calc-manual">
+      <label>o escribe el total de cartas directo:</label>
+      <input type="number" placeholder="—" value="${calcManual===null?'':calcManual}"
+        oninput="setManual(this.value)">
+    </div>
+
+    <h3 style="margin-top:14px;">Especiales de esta jugada</h3>
+    <div class="subtitle" style="margin:-4px 0 8px;">Se suman siempre al total de cartas, no lo reemplazan.</div>
+    <div class="calc-special">
+      <div class="calc-btn mono" onclick="bump('mono',1)" oncontextmenu="event.preventDefault();bump('mono',-1);">
+        <div class="lbl">MONO</div><div class="val">+50</div>
+        <span class="count">${calcSpecials.mono}</span>
+      </div>
+      <div class="calc-btn pen" onclick="bump('picadas',1)" oncontextmenu="event.preventDefault();bump('picadas',-1);">
+        <div class="lbl">PICADAS</div><div class="val">-50</div>
+        <span class="count">${calcSpecials.picadas}</span>
+      </div>
+      <div class="calc-btn pen" onclick="bump('relancino',1)" oncontextmenu="event.preventDefault();bump('relancino',-1);">
+        <div class="lbl">RELANCINO</div><div class="val">-50</div>
+        <span class="count">${calcSpecials.relancino}</span>
+      </div>
+    </div>
+
+    <div class="calc-total">
+      <span class="lbl">${cp} (cartas) ${sp>=0?'+':'-'} ${Math.abs(sp)} (especiales)</span>
+      <span class="num">${subtotal}</span>
+    </div>
+    <div class="calc-actions">
+      <button class="btn btn-outline" onclick="closeCalc()">Cancelar</button>
+      <button class="btn btn-gold" onclick="saveCalc()">Guardar</button>
+    </div>
+  </div>`;
+}
+
+loadState();
+</script>
+</body>
+</html>
