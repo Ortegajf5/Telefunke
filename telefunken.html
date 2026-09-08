@@ -154,7 +154,7 @@
     border-radius:14px;padding:14px;
   }
   .calc h3{font-size:15px;margin-bottom:10px;}
-  .calc-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;}
+  .calc-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;}
   .calc-btn{
     background:var(--cream);color:var(--ink);
     border-radius:12px;padding:12px 6px;text-align:center;cursor:pointer;
@@ -165,7 +165,7 @@
   .calc-btn .count{
     display:block;margin-top:4px;font-family:ui-rounded, 'Segoe UI', system-ui, sans-serif; font-weight:800;font-size:15px;color:var(--brick);
   }
-  .calc-special{margin-top:10px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;}
+  .calc-special{margin-top:10px;display:grid;grid-template-columns:1fr 1fr;gap:8px;}
   .calc-special .calc-btn.mono{background:var(--gold);}
   .calc-special .calc-btn.pen{background:var(--brick);color:var(--cream);}
   .calc-special .calc-btn.pen .val{color:var(--cream);}
@@ -177,9 +177,9 @@
   }
   .calc-total .lbl{font-weight:700;color:var(--cream-dim);font-size:13px;}
   .calc-total .num{font-family:ui-rounded, 'Segoe UI', system-ui, sans-serif; font-weight:800;font-size:26px;color:var(--gold);}
-  .calc-manual{display:flex;align-items:center;gap:8px;margin-top:8px;}
-  .calc-manual label{font-size:12px;color:var(--cream-dim);flex:1;}
-  .calc-manual input{width:80px;text-align:right;}
+  .calc-manual{display:flex;align-items:center;gap:6px;margin-top:8px;flex-wrap:wrap;}
+  .calc-manual label{font-size:12px;color:var(--cream-dim);flex:1 1 100%;}
+  .calc-manual input{width:70px;text-align:right;}
   .calc-actions{display:flex;gap:8px;margin-top:12px;}
   .calc-actions .btn{flex:1;}
 
@@ -231,8 +231,8 @@ let state = {
 };
 
 let calcOpenFor = null;   // {roundId, playerId}
-let calcCounts = {low:0, mid:0, high:0};
-let calcSpecials = {mono:0, picadas:0, relancino:0};
+let calcCounts = {low:0, mid:0, high:0, mono:0};
+let calcSpecials = {picadas:0, relancino:0};
 let calcManual = null;    // manual override for CARD points only (not specials)
 
 function cryptoId(){
@@ -275,11 +275,11 @@ function cardValue(kind){
 
 function cardPoints(){
   if(calcManual !== null && calcManual !== '') return Number(calcManual);
-  return calcCounts.low*5 + calcCounts.mid*10 + calcCounts.high*15;
+  return calcCounts.low*5 + calcCounts.mid*10 + calcCounts.high*15 + calcCounts.mono*50;
 }
 
 function specialPoints(){
-  return calcSpecials.mono*50 + calcSpecials.picadas*(-50) + calcSpecials.relancino*(-50);
+  return calcSpecials.picadas*(-50) + calcSpecials.relancino*(-50);
 }
 
 function calcSubtotal(){
@@ -289,8 +289,8 @@ function calcSubtotal(){
 function openCalc(roundId, playerId){
   calcOpenFor = {roundId, playerId};
   const existing = (state.scores[roundId] || {})[playerId];
-  calcCounts = {low:0, mid:0, high:0};
-  calcSpecials = {mono:0, picadas:0, relancino:0};
+  calcCounts = {low:0, mid:0, high:0, mono:0};
+  calcSpecials = {picadas:0, relancino:0};
   calcManual = (existing !== undefined && existing !== null) ? String(existing) : null;
   render();
 }
@@ -301,13 +301,19 @@ function closeCalc(){
 }
 
 function bump(kind, delta){
-  if(kind==='low' || kind==='mid' || kind==='high'){
+  if(kind==='low' || kind==='mid' || kind==='high' || kind==='mono'){
     calcManual = null; // escribir/tocar cartas usa un solo modo para las cartas
     calcCounts[kind] = Math.max(0, (calcCounts[kind]||0) + delta);
   } else {
-    // mono / picadas / relancino: siempre se suman aparte, nunca borran las cartas
+    // picadas / relancino: siempre se suman aparte, nunca borran las cartas
     calcSpecials[kind] = Math.max(0, (calcSpecials[kind]||0) + delta);
   }
+  render();
+}
+
+function stepManual(delta){
+  const current = (calcManual !== null && calcManual !== '') ? Number(calcManual) : 0;
+  calcManual = String(Math.max(0, current + delta));
   render();
 }
 
@@ -562,8 +568,8 @@ function render(){
         <b>Mazo:</b> cartas de póker. LIMPIO = mismo número, distinta figura (palo),
         sin comodín — aplica a tríos y cuartetos. La escalera debe ser de la misma
         figura, mínimo 7 cartas, puede llevar un MONO (comodín), y va de un extremo
-        al otro sin dar la vuelta: válido A-2-3-4-5-6-7 u 8-9-10-J-Q-K-A; nunca
-        J-Q-K-A-2-3-4.
+        al otro sin dar la vuelta: válido A-2-3-4-5-6-7 u 8-9-10-J-Q-K-A; <span style="color:var(--brick);font-weight:800;">nunca
+        J-Q-K-A-2-3-4</span>.
       </div>
     </div>
   </div>`;
@@ -754,20 +760,22 @@ function renderCalc(){
         <div class="lbl">As</div><div class="val">15 pts c/u</div>
         <span class="count">${calcCounts.high}</span>
       </div>
+      <div class="calc-btn mono" onclick="bump('mono',1)" oncontextmenu="event.preventDefault();bump('mono',-1);">
+        <div class="lbl">MONO</div><div class="val">50 pts c/u</div>
+        <span class="count">${calcCounts.mono}</span>
+      </div>
     </div>
     <div class="calc-manual">
       <label>o escribe el total de cartas directo:</label>
+      <button class="btn btn-outline" style="padding:8px 12px;" onclick="stepManual(-5)">-5</button>
       <input type="number" placeholder="—" value="${calcManual===null?'':calcManual}"
         oninput="setManual(this.value)">
+      <button class="btn btn-outline" style="padding:8px 12px;" onclick="stepManual(5)">+5</button>
     </div>
 
     <h3 style="margin-top:14px;">Especiales de esta jugada</h3>
     <div class="subtitle" style="margin:-4px 0 8px;">Se suman siempre al total de cartas, no lo reemplazan.</div>
     <div class="calc-special">
-      <div class="calc-btn mono" onclick="bump('mono',1)" oncontextmenu="event.preventDefault();bump('mono',-1);">
-        <div class="lbl">MONO</div><div class="val">+50</div>
-        <span class="count">${calcSpecials.mono}</span>
-      </div>
       <div class="calc-btn pen" onclick="bump('picadas',1)" oncontextmenu="event.preventDefault();bump('picadas',-1);">
         <div class="lbl">PICADAS</div><div class="val">-50</div>
         <span class="count">${calcSpecials.picadas}</span>
