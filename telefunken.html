@@ -229,7 +229,9 @@ let state = {
   legendOpen: false,
   shareOpen: false,
   importText: '',
-  history: [],           // [{id,name,date,players,rounds,scores}]
+  history: [],           // [{id,name,date,players,rounds,scores,anfitrion,startedAt,endedAt}]
+  anfitrion: '',         // se recuerda de una partida a otra
+  startedAt: null,       // se fija solo al guardar el primer puntaje de la partida
 };
 
 let calcOpenFor = null;   // {roundId, playerId}
@@ -254,7 +256,6 @@ async function loadState(){
   }catch(e){
     if(state.rounds.length) state.activeRoundId = state.rounds[0].id;
   }
-  render();
 }
 
 async function saveState(){
@@ -327,6 +328,7 @@ function saveCalc(){
   const {roundId, playerId} = calcOpenFor;
   if(!state.scores[roundId]) state.scores[roundId] = {};
   state.scores[roundId][playerId] = calcSubtotal();
+  if(!state.startedAt) state.startedAt = new Date().toISOString();
   calcOpenFor = null;
   saveState();
   render();
@@ -398,9 +400,13 @@ async function newGame(){
       players: JSON.parse(JSON.stringify(state.players)),
       rounds: JSON.parse(JSON.stringify(state.rounds)),
       scores: JSON.parse(JSON.stringify(state.scores)),
+      anfitrion: state.anfitrion || '',
+      startedAt: state.startedAt || null,
+      endedAt: new Date().toISOString(),
     });
   }
   state.scores = {};
+  state.startedAt = null;
   state.activeRoundId = state.rounds.length ? state.rounds[0].id : null;
   saveState();
   render();
@@ -464,6 +470,8 @@ async function resetAll(){
     shareOpen: false,
     importText: '',
     history: [],
+    anfitrion: '',
+    startedAt: null,
   };
   state.activeRoundId = state.rounds[0].id;
   await saveState();
@@ -500,6 +508,11 @@ function setImportText(v){
   state.importText = v;
 }
 
+function setAnfitrion(v){
+  state.anfitrion = v;
+  saveState();
+}
+
 function importData(){
   try{
     const txt = (state.importText||'').trim();
@@ -534,10 +547,21 @@ function render(){
   html += `
   <div class="title-row">
     <img class="logo-badge" src="${LOGO_DATA_URI}" alt="Logo Telefunken">
-    <div>
+    <div style="flex:1;">
       <h1>Control de Jugadas</h1>
       <div class="subtitle">Telefunken · anota, suma y no discutas más los puntos</div>
     </div>
+  </div>
+  <div style="margin-top:6px;"><button class="link-btn" onclick="goToHub()">&larr; Cambiar de juego</button></div>`;
+
+  // Sesión (anfitrión)
+  html += `
+  <div class="card">
+    <h2 style="font-size:16px;margin-bottom:10px;">Sesión</h2>
+    <div class="player-add">
+      <input type="text" placeholder="Anfitrión (¿en casa de quién jugamos?)" value="${esc(state.anfitrion||'')}" oninput="setAnfitrion(this.value)">
+    </div>
+    ${state.startedAt ? `<div class="subtitle" style="margin-top:8px;">Partida iniciada: ${new Date(state.startedAt).toLocaleString('es',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}</div>` : ''}
   </div>`;
 
   // Legend
@@ -693,6 +717,12 @@ function render(){
       const totals = gameTotals(g);
       const dateStr = new Date(g.date).toLocaleDateString('es', {day:'2-digit',month:'2-digit',year:'2-digit'});
       const ranked = g.players.slice().sort((a,b)=> totals[a.id]-totals[b.id]);
+      let durStr = '';
+      if(g.startedAt && g.endedAt){
+        const s = new Date(g.startedAt), e = new Date(g.endedAt);
+        const hhmm = d => d.toLocaleTimeString('es', {hour:'2-digit', minute:'2-digit'});
+        durStr = `${hhmm(s)}–${hhmm(e)}`;
+      }
       html += `
       <div style="padding:10px 0;border-top:1px solid rgba(250,243,227,0.12);">
         <div style="display:flex;gap:8px;align-items:center;">
@@ -700,6 +730,7 @@ function render(){
           <span class="subtitle" style="white-space:nowrap;">${dateStr}</span>
           <button onclick="deleteHistoryItem('${g.id}')" style="background:none;border:none;color:var(--brick);font-size:16px;cursor:pointer;padding:2px 4px;">✕</button>
         </div>
+        ${(g.anfitrion || durStr) ? `<div class="subtitle" style="margin-top:4px;">${g.anfitrion?`Anfitrión: ${esc(g.anfitrion)}`:''}${g.anfitrion && durStr?' · ':''}${durStr}</div>` : ''}
         <div class="chip-row" style="margin-top:8px;">`;
       ranked.forEach((p,i)=>{
         html += `<span class="chip">${i===0?'👑 ':''}${esc(p.name)} <span class="pts">${totals[p.id]||0}</span></span>`;
@@ -807,8 +838,452 @@ function renderCalc(){
     </div>
   </div>`;
 }
+/* =========================================================================
+   SHELL: candado (PIN), menú de juegos (hub) y módulo Sequence
+   ========================================================================= */
 
-loadState();
+const PIN_KEY = 'app_pin_hash_v1';
+const UNLOCK_KEY = 'app_unlocked_v1';
+const CURRENT_GAME_KEY = 'app_current_game_v1';
+const SQ_STORAGE_KEY = 'sequence_state_v1';
+
+let currentGame = null; // null (hub) | 'telefunken' | 'sequence'
+let pinDraft = '';
+let pinDraft2 = '';
+let pinError = '';
+let pinMode = null; // 'setup' | 'enter' | 'change-current' | 'change-new'
+let pinChangeOld = '';
+
+function simpleHash(str){
+  let h = 0;
+  for(let i=0;i<str.length;i++){
+    h = (h*31 + str.charCodeAt(i)) | 0;
+  }
+  return 'h' + Math.abs(h).toString(36);
+}
+
+function appRoot(){
+  return document.getElementById('app');
+}
+
+function renderShell(){
+  const unlocked = sessionStorage.getItem(UNLOCK_KEY) === '1';
+  if(!unlocked){
+    renderGate();
+    return;
+  }
+  if(currentGame === 'telefunken'){
+    render();
+  } else if(currentGame === 'sequence'){
+    renderSequence();
+  } else {
+    renderHub();
+  }
+}
+
+function goToHub(){
+  currentGame = null;
+  try{ localStorage.setItem(CURRENT_GAME_KEY, ''); }catch(e){}
+  renderShell();
+}
+
+function openGame(name){
+  currentGame = name;
+  try{ localStorage.setItem(CURRENT_GAME_KEY, name); }catch(e){}
+  renderShell();
+}
+
+/* ---------------- PIN gate ---------------- */
+
+function renderGate(){
+  const hasPin = !!localStorage.getItem(PIN_KEY);
+  if(pinMode === null) pinMode = hasPin ? 'enter' : 'setup';
+
+  let body = '';
+  if(pinMode === 'setup'){
+    body = `
+      <h2 style="font-size:18px;margin-bottom:6px;">Crea un PIN</h2>
+      <div class="subtitle" style="margin-bottom:12px;">Este PIN protege la app en este dispositivo. Compártelo solo con quien quieras darle acceso.</div>
+      <input type="password" inputmode="numeric" placeholder="Nuevo PIN" value="${esc(pinDraft)}" oninput="pinDraft=this.value" style="width:100%;margin-bottom:8px;">
+      <input type="password" inputmode="numeric" placeholder="Repite el PIN" value="${esc(pinDraft2)}" oninput="pinDraft2=this.value" style="width:100%;">
+      ${pinError?`<div class="subtitle" style="color:var(--brick);margin-top:8px;">${esc(pinError)}</div>`:''}
+      <button class="btn btn-gold" style="width:100%;margin-top:14px;" onclick="submitPinSetup()">Guardar PIN</button>
+    `;
+  } else if(pinMode === 'enter'){
+    body = `
+      <h2 style="font-size:18px;margin-bottom:6px;">Ingresa tu PIN</h2>
+      <div class="subtitle" style="margin-bottom:12px;">Esta app está protegida en este dispositivo.</div>
+      <input type="password" inputmode="numeric" placeholder="PIN" value="${esc(pinDraft)}" oninput="pinDraft=this.value" style="width:100%;">
+      ${pinError?`<div class="subtitle" style="color:var(--brick);margin-top:8px;">${esc(pinError)}</div>`:''}
+      <button class="btn btn-gold" style="width:100%;margin-top:14px;" onclick="submitPinEnter()">Entrar</button>
+      <div class="subtitle" style="margin-top:14px;">¿Olvidaste el PIN? Solo quien controle este teléfono puede borrar los datos del sitio (desde Ajustes de Safari) para reiniciarlo — eso también borra el historial guardado aquí.</div>
+    `;
+  }
+
+  appRoot().innerHTML = `
+  <div class="card" style="margin-top:60px;">
+    <div style="text-align:center;margin-bottom:16px;">
+      <img src="${LOGO_DATA_URI}" alt="Logo" style="width:72px;height:72px;border-radius:50%;">
+    </div>
+    ${body}
+  </div>`;
+}
+
+function submitPinSetup(){
+  if(!pinDraft || pinDraft.length<3){ pinError='El PIN debe tener al menos 3 dígitos/caracteres.'; renderGate(); return; }
+  if(pinDraft !== pinDraft2){ pinError='Los dos PIN no coinciden.'; renderGate(); return; }
+  localStorage.setItem(PIN_KEY, simpleHash(pinDraft));
+  sessionStorage.setItem(UNLOCK_KEY, '1');
+  pinDraft=''; pinDraft2=''; pinError=''; pinMode=null;
+  renderShell();
+}
+
+function submitPinEnter(){
+  const hash = localStorage.getItem(PIN_KEY);
+  if(simpleHash(pinDraft) === hash){
+    sessionStorage.setItem(UNLOCK_KEY, '1');
+    pinDraft=''; pinError=''; pinMode=null;
+    renderShell();
+  } else {
+    pinError = 'PIN incorrecto.';
+    pinDraft='';
+    renderGate();
+  }
+}
+
+function lockApp(){
+  sessionStorage.removeItem(UNLOCK_KEY);
+  currentGame = null;
+  pinMode = null;
+  renderShell();
+}
+
+function startChangePin(){
+  const newHash = prompt('Escribe tu PIN actual para confirmar:');
+  if(newHash === null) return;
+  if(simpleHash(newHash) !== localStorage.getItem(PIN_KEY)){
+    alert('PIN actual incorrecto.');
+    return;
+  }
+  const p1 = prompt('Nuevo PIN:');
+  if(p1 === null || p1.length<3){ alert('PIN inválido.'); return; }
+  const p2 = prompt('Repite el nuevo PIN:');
+  if(p1 !== p2){ alert('Los dos PIN no coinciden.'); return; }
+  localStorage.setItem(PIN_KEY, simpleHash(p1));
+  alert('PIN actualizado.');
+}
+
+/* ---------------- Hub ---------------- */
+
+function renderHub(){
+  appRoot().innerHTML = `
+  <div class="title-row">
+    <img class="logo-badge" src="${LOGO_DATA_URI}" alt="Logo">
+    <div>
+      <h1>¿Qué vamos a jugar?</h1>
+      <div class="subtitle">Elige un juego para empezar a anotar</div>
+    </div>
+  </div>
+
+  <div class="card" style="cursor:pointer;" onclick="openGame('telefunken')">
+    <h2 style="font-size:18px;">🃏 Telefunken</h2>
+    <div class="subtitle" style="margin-top:4px;">Control de jugadas, puntos e historial</div>
+  </div>
+
+  <div class="card" style="cursor:pointer;" onclick="openGame('sequence')">
+    <h2 style="font-size:18px;">🔷 Sequence</h2>
+    <div class="subtitle" style="margin-top:4px;">Equipos, anfitrión y estadísticas de quién gana más</div>
+  </div>
+
+  <div class="card" style="opacity:0.5;">
+    <h2 style="font-size:16px;">➕ Más juegos próximamente</h2>
+    <div class="subtitle" style="margin-top:4px;">Dominó, Generala y otros se agregarán aquí</div>
+  </div>
+
+  <div class="footer-actions" style="flex-direction:column;gap:8px;">
+    <button class="link-btn" onclick="startChangePin()">Cambiar PIN</button>
+    <button class="link-btn" onclick="lockApp()">Bloquear ahora</button>
+  </div>
+  `;
+}
+
+/* ---------------- Sequence module ---------------- */
+
+const SQ_COLORS = [
+  {key:'azul', label:'Azul', hex:'#2c5aa0'},
+  {key:'rojo', label:'Rojo', hex:'#b8452f'},
+  {key:'verde', label:'Verde', hex:'#3e7a52'},
+];
+
+let sqState = {
+  anfitrion: '',
+  teamCount: 2,               // 2 o 3
+  setupPlayers: {azul:[], rojo:[], verde:[]},   // nombres mientras se arma el juego
+  current: null,               // {id, anfitrion, startedAt, teams:[{key,label,players:[]}]}
+  history: [],                 // [{id, anfitrion, date, startedAt, endedAt, teams:[...], winnerKey}]
+};
+
+async function loadSequenceState(){
+  try{
+    const raw = localStorage.getItem(SQ_STORAGE_KEY);
+    if(raw){
+      const parsed = JSON.parse(raw);
+      sqState = Object.assign(sqState, parsed);
+    }
+  }catch(e){}
+}
+
+async function saveSequenceState(){
+  try{
+    localStorage.setItem(SQ_STORAGE_KEY, JSON.stringify(sqState));
+  }catch(e){
+    console.error('No se pudo guardar Sequence', e);
+  }
+}
+
+function sqSetAnfitrion(v){
+  sqState.anfitrion = v;
+  saveSequenceState();
+}
+
+function sqSetTeamCount(n){
+  sqState.teamCount = n;
+  saveSequenceState();
+  renderSequence();
+}
+
+function sqAddPlayer(colorKey, name){
+  name = (name||'').trim();
+  if(!name) return;
+  sqState.setupPlayers[colorKey].push(name);
+  saveSequenceState();
+  renderSequence();
+}
+
+function sqRemovePlayer(colorKey, idx){
+  sqState.setupPlayers[colorKey].splice(idx,1);
+  saveSequenceState();
+  renderSequence();
+}
+
+function sqActiveColors(){
+  return SQ_COLORS.slice(0, sqState.teamCount);
+}
+
+function sqStartGame(){
+  const active = sqActiveColors();
+  const teams = active.map(c => ({
+    key: c.key, label: c.label,
+    players: sqState.setupPlayers[c.key].slice(),
+  }));
+  const readyTeams = teams.filter(t=>t.players.length>0);
+  if(readyTeams.length < 2){
+    alert('Agrega al menos un jugador en 2 equipos para empezar.');
+    return;
+  }
+  sqState.current = {
+    id: cryptoId(),
+    anfitrion: sqState.anfitrion || '',
+    startedAt: new Date().toISOString(),
+    teams,
+  };
+  saveSequenceState();
+  renderSequence();
+}
+
+function sqDeclareWinner(colorKey){
+  if(!sqState.current) return;
+  if(!confirm('¿Confirmar que este equipo ganó la partida?')) return;
+  const finished = {
+    id: sqState.current.id,
+    anfitrion: sqState.current.anfitrion,
+    date: new Date().toISOString(),
+    startedAt: sqState.current.startedAt,
+    endedAt: new Date().toISOString(),
+    teams: sqState.current.teams,
+    winnerKey: colorKey,
+  };
+  sqState.history.unshift(finished);
+  sqState.current = null;
+  saveSequenceState();
+  renderSequence();
+}
+
+function sqCancelGame(){
+  if(!confirm('¿Cancelar este juego sin guardar resultado?')) return;
+  sqState.current = null;
+  saveSequenceState();
+  renderSequence();
+}
+
+function sqPlayAgainSameTeams(){
+  // deja los mismos nombres cargados en setupPlayers (ya están, no se borran al iniciar)
+  renderSequence();
+}
+
+function sqDeleteHistoryItem(id){
+  if(!confirm('¿Borrar este juego del historial?')) return;
+  sqState.history = sqState.history.filter(g=>g.id!==id);
+  saveSequenceState();
+  renderSequence();
+}
+
+function sqColorInfo(key){
+  return SQ_COLORS.find(c=>c.key===key) || {label:key, hex:'#888'};
+}
+
+function sqComputeStats(){
+  const teamStats = {}; // key -> {games,wins}
+  SQ_COLORS.forEach(c=> teamStats[c.key] = {games:0, wins:0});
+  const playerStats = {}; // name -> {games,wins}
+
+  sqState.history.forEach(g=>{
+    g.teams.forEach(t=>{
+      if(teamStats[t.key]){
+        teamStats[t.key].games++;
+        if(t.key === g.winnerKey) teamStats[t.key].wins++;
+      }
+      t.players.forEach(name=>{
+        if(!playerStats[name]) playerStats[name] = {games:0, wins:0};
+        playerStats[name].games++;
+        if(t.key === g.winnerKey) playerStats[name].wins++;
+      });
+    });
+  });
+
+  const teamList = SQ_COLORS.map(c=>({...c, ...teamStats[c.key]})).filter(t=>t.games>0);
+  const playerList = Object.entries(playerStats).map(([name,d])=>({name, ...d}));
+  playerList.sort((a,b)=> b.wins-a.wins || b.games-a.games);
+  return {teamList, playerList};
+}
+
+function renderSequence(){
+  let html = '';
+
+  html += `
+  <div class="title-row">
+    <img class="logo-badge" src="${LOGO_DATA_URI}" alt="Logo">
+    <div>
+      <h1>Sequence</h1>
+      <div class="subtitle">Equipos, anfitrión y quién gana más</div>
+    </div>
+  </div>
+  <div style="margin-top:6px;"><button class="link-btn" onclick="goToHub()">&larr; Cambiar de juego</button></div>`;
+
+  if(sqState.current){
+    // Juego en curso
+    html += `<div class="card">
+      <h2 style="font-size:16px;margin-bottom:6px;">Juego en curso</h2>
+      ${sqState.current.anfitrion?`<div class="subtitle" style="margin-bottom:10px;">Anfitrión: ${esc(sqState.current.anfitrion)}</div>`:''}`;
+    sqState.current.teams.forEach(t=>{
+      const info = sqColorInfo(t.key);
+      html += `
+      <div style="margin-top:10px;padding:10px;border-radius:10px;background:${info.hex}22;border:1px solid ${info.hex}55;">
+        <div style="font-weight:800;color:${info.hex};margin-bottom:4px;">${info.label}</div>
+        <div class="subtitle">${t.players.map(esc).join(', ') || 'sin jugadores'}</div>
+        <button class="btn btn-gold" style="margin-top:8px;width:100%;" onclick="sqDeclareWinner('${t.key}')">Declarar ganador</button>
+      </div>`;
+    });
+    html += `
+      <button class="btn btn-outline" style="width:100%;margin-top:14px;" onclick="sqCancelGame()">Cancelar juego</button>
+    </div>`;
+  } else {
+    // Configuración de un juego nuevo
+    html += `<div class="card">
+      <h2 style="font-size:16px;margin-bottom:10px;">Nuevo juego</h2>
+      <input type="text" placeholder="Anfitrión (¿en casa de quién jugamos?)" value="${esc(sqState.anfitrion||'')}" oninput="sqSetAnfitrion(this.value)" style="width:100%;margin-bottom:12px;">
+      <div class="rounds-scroll" style="margin-bottom:14px;">
+        <div class="round-tab ${sqState.teamCount===2?'active':''}" onclick="sqSetTeamCount(2)">2 equipos</div>
+        <div class="round-tab ${sqState.teamCount===3?'active':''}" onclick="sqSetTeamCount(3)">3 equipos</div>
+      </div>`;
+
+    sqActiveColors().forEach(c=>{
+      html += `
+      <div style="margin-top:10px;padding:10px;border-radius:10px;background:${c.hex}22;border:1px solid ${c.hex}55;">
+        <div style="font-weight:800;color:${c.hex};margin-bottom:8px;">${c.label}</div>
+        <div class="player-add">
+          <input type="text" id="sq-input-${c.key}" placeholder="Nombre del jugador" onkeydown="if(event.key==='Enter'){sqAddPlayer('${c.key}',this.value);this.value='';}">
+          <button class="btn btn-gold" onclick="const i=document.getElementById('sq-input-${c.key}'); sqAddPlayer('${c.key}', i.value); i.value='';">Añadir</button>
+        </div>
+        <div class="player-list" style="margin-top:8px;">
+          ${sqState.setupPlayers[c.key].map((name,idx)=>`
+            <div class="player-chip">
+              <span class="name">${esc(name)}</span>
+              <button onclick="sqRemovePlayer('${c.key}', ${idx})" title="Quitar">✕</button>
+            </div>`).join('')}
+        </div>
+      </div>`;
+    });
+
+    html += `
+      <button class="btn btn-gold" style="width:100%;margin-top:16px;" onclick="sqStartGame()">Iniciar juego</button>
+    </div>`;
+  }
+
+  // Historial agrupado por jornada (mismo anfitrión + misma fecha)
+  if(sqState.history.length){
+    const groups = [];
+    sqState.history.forEach(g=>{
+      const dayKey = (g.anfitrion||'—') + '|' + new Date(g.date).toDateString();
+      let grp = groups.find(x=>x.key===dayKey);
+      if(!grp){ grp = {key:dayKey, anfitrion:g.anfitrion, date:g.date, games:[]}; groups.push(grp); }
+      grp.games.push(g);
+    });
+
+    html += `<div class="card"><h2 style="font-size:16px;margin-bottom:6px;">Historial por jornada</h2>`;
+    groups.forEach(grp=>{
+      const dateStr = new Date(grp.date).toLocaleDateString('es', {day:'2-digit',month:'2-digit',year:'2-digit'});
+      html += `<div style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(250,243,227,0.12);">
+        <div class="subtitle" style="font-weight:700;color:var(--cream);">${grp.anfitrion?esc(grp.anfitrion):'Sin anfitrión'} · ${dateStr}</div>`;
+      grp.games.forEach(g=>{
+        const winner = sqColorInfo(g.winnerKey);
+        html += `<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;">
+          <div class="subtitle">${g.teams.map(t=>`${sqColorInfo(t.key).label} (${t.players.length})`).join(' vs ')}</div>
+          <span class="chip" style="background:${winner.hex};color:#fff;">👑 ${winner.label}</span>
+          <button onclick="sqDeleteHistoryItem('${g.id}')" style="background:none;border:none;color:var(--brick);font-size:14px;cursor:pointer;padding:2px 6px;">✕</button>
+        </div>`;
+      });
+      html += `</div>`;
+    });
+    html += `</div>`;
+
+    const stats = sqComputeStats();
+    html += `<div class="card"><h2 style="font-size:16px;margin-bottom:10px;">Estadísticas por equipo</h2>
+      <div class="table-scroll"><table class="score-table"><thead><tr>
+        <th class="rowlabel">Equipo</th><th>Jugados</th><th>Ganados</th><th>%</th>
+      </tr></thead><tbody>`;
+    stats.teamList.forEach(t=>{
+      const pct = t.games ? Math.round((t.wins/t.games)*100) : 0;
+      html += `<tr><td class="rowlabel" style="color:${t.hex};font-weight:800;">${t.label}</td><td>${t.games}</td><td>${t.wins}</td><td>${pct}%</td></tr>`;
+    });
+    html += `</tbody></table></div></div>`;
+
+    html += `<div class="card"><h2 style="font-size:16px;margin-bottom:10px;">Jugadores que más ganan</h2>
+      <div class="table-scroll"><table class="score-table"><thead><tr>
+        <th class="rowlabel">Jugador</th><th>Jugados</th><th>Ganados</th>
+      </tr></thead><tbody>`;
+    stats.playerList.forEach(p=>{
+      html += `<tr><td class="rowlabel">${esc(p.name)}</td><td>${p.games}</td><td>${p.wins}</td></tr>`;
+    });
+    html += `</tbody></table></div></div>`;
+  }
+
+  appRoot().innerHTML = html;
+}
+
+/* ---------------- Arranque ---------------- */
+
+async function initApp(){
+  await loadState();
+  await loadSequenceState();
+  try{
+    const savedGame = localStorage.getItem(CURRENT_GAME_KEY);
+    if(savedGame === 'telefunken' || savedGame === 'sequence') currentGame = savedGame;
+  }catch(e){}
+  renderShell();
+}
+
+initApp();
 </script>
 </body>
 </html>
