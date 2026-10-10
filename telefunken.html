@@ -241,6 +241,10 @@ let state = {
   citaAnfitrion: '',
   citaStartedAt: null,
   repartidorId: null,    // jugador que reparte esta partida
+  pickDir: -1,           // quien pica: -1 = anterior en la lista (por defecto), 1 = siguiente
+  histOpen: false,       // tarjeta de historial plegada/desplegada
+  histGroup: true,       // agrupar historial por cita
+  histOpenGroups: {},    // citas desplegadas: {clave: true}
 };
 
 let calcOpenFor = null;   // {roundId, playerId}
@@ -492,9 +496,70 @@ function winnerOfCurrentGame(){
   return best;
 }
 
+/* ---------------- Repartidor y quien pica ----------------
+   Orden de asiento = orden de la lista. Si no hay repartidor elegido, reparte el
+   primero de la lista y pica el último. Quien pica es el que está al lado del
+   repartidor en el sentido elegido (por defecto, el anterior en la lista). */
+function effectiveDealerId(){
+  if(!state.players.length) return null;
+  if(state.repartidorId && state.players.some(p=>p.id===state.repartidorId)) return state.repartidorId;
+  return state.players[0].id;
+}
+function pickerIdFor(dealerId, players, dir){
+  if(!dealerId || !players || players.length<2) return null;
+  const i = players.findIndex(p=>p.id===dealerId);
+  if(i<0) return null;
+  const d = (dir===1) ? 1 : -1;
+  return players[(i + d + players.length) % players.length].id;
+}
+function currentPickerId(){
+  return pickerIdFor(effectiveDealerId(), state.players, state.pickDir);
+}
+function currentFirstId(){
+  // juega primero el que está al otro lado del que pica (a la derecha del repartidor)
+  return pickerIdFor(effectiveDealerId(), state.players, state.pickDir===1 ? -1 : 1);
+}
+function rotatePlayersTo(dealerId){
+  // desplaza a todos los jugadores (mismo orden de asiento) para que el repartidor quede primero
+  const i = state.players.findIndex(p=>p.id===dealerId);
+  if(i>0) state.players = state.players.slice(i).concat(state.players.slice(0,i));
+}
+function nextDealerAfter(dealerId){
+  // el reparto se desplaza un asiento (siguiente en la lista), sin importar quién ganó
+  const n = state.players.length;
+  if(!n) return null;
+  const i = state.players.findIndex(p=>p.id===dealerId);
+  return state.players[(i<0 ? 0 : i+1) % n].id;
+}
+function roleIcons(playerId, dealerId, pickerId, firstId){
+  return (playerId===dealerId?'🃏 ':'') + (playerId===pickerId?'✂️ ':'') + (playerId===firstId?'▶️ ':'');
+}
+function togglePickDir(){
+  state.pickDir = state.pickDir===1 ? -1 : 1;
+  saveState();
+  render();
+}
+function toggleHistOpen(){
+  state.histOpen = !state.histOpen;
+  saveState();
+  render();
+}
+function toggleHistGroup(){
+  state.histGroup = state.histGroup === false ? true : false;
+  saveState();
+  render();
+}
+function toggleHistCita(encKey){
+  const key = decodeURIComponent(encKey);
+  if(!state.histOpenGroups) state.histOpenGroups = {};
+  state.histOpenGroups[key] = !state.histOpenGroups[key];
+  saveState();
+  render();
+}
+
 async function newGame(){
   const hasAnyScore = Object.keys(state.scores).some(rid => Object.keys(state.scores[rid]||{}).length>0);
-  let nextDealerId = state.repartidorId || null;
+  let nextDealerId = effectiveDealerId();
   if(hasAnyScore && state.players.length){
     const winner = winnerOfCurrentGame();
     const defaultName = 'Partida ' + (state.history.length + 1);
@@ -514,14 +579,18 @@ async function newGame(){
       startedAt: state.startedAt || null,
       endedAt: new Date().toISOString(),
       citaId: state.citaId,
-      repartidorId: state.repartidorId || null,
+      repartidorId: effectiveDealerId(),
+      picadorId: currentPickerId(),
+      pickDir: state.pickDir===1 ? 1 : -1,
       winnerId: winner ? winner.id : null,
     });
-    if(winner) nextDealerId = winner.id;
+    // el ganador pasa a repartir y todos los jugadores se desplazan
+    nextDealerId = winner ? winner.id : nextDealerAfter(effectiveDealerId());
   }
   state.scores = {};
   state.startedAt = null;
   state.repartidorId = nextDealerId;
+  rotatePlayersTo(nextDealerId);
   state.activeRoundId = state.rounds.length ? state.rounds[0].id : null;
   saveState();
   render();
@@ -539,6 +608,7 @@ function startNuevaCita(){
       state.citaAnfitrion = state.anfitrion || '';
       state.citaStartedAt = new Date().toISOString();
       state.repartidorId = dealerId;
+      rotatePlayersTo(dealerId);
       saveState();
       render();
     });
@@ -619,6 +689,10 @@ async function resetAll(){
       citaAnfitrion: '',
       citaStartedAt: null,
       repartidorId: null,
+      pickDir: state.pickDir===1 ? 1 : -1,
+      histOpen: false,
+      histGroup: state.histGroup !== false,
+      histOpenGroups: {},
     };
     state.activeRoundId = state.rounds[0].id;
     await saveState();
@@ -680,6 +754,20 @@ function importData(){
   }
 }
 
+/* Redibuja la pantalla sin mover el scroll (ni el vertical de la página
+   ni el horizontal de las listas de jugadas y tablas). */
+function setAppHTML(el, html){
+  const y = window.pageYOffset || document.documentElement.scrollTop || 0;
+  const sel = '.rounds-scroll,.table-scroll';
+  const hs = Array.from(el.querySelectorAll(sel)).map(e=>e.scrollLeft);
+  const h = el.offsetHeight;
+  if(h) el.style.minHeight = h + 'px'; // evita que la página se encoja un instante
+  el.innerHTML = html;
+  el.querySelectorAll(sel).forEach((e,i)=>{ if(hs[i]) e.scrollLeft = hs[i]; });
+  window.scrollTo(0, y);
+  el.style.minHeight = '';
+}
+
 function esc(s){
   return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
@@ -709,14 +797,21 @@ function render(){
   <div style="margin-top:6px;"><button class="link-btn" onclick="goToHub()">&larr; Cambiar de juego</button></div>`;
 
   // Sesión (anfitrión)
-  const repartidor = state.repartidorId ? state.players.find(p=>p.id===state.repartidorId) : null;
+  const dealerId = effectiveDealerId();
+  const pickerId = currentPickerId();
+  const firstId = currentFirstId();
+  const repartidor = dealerId ? state.players.find(p=>p.id===dealerId) : null;
+  const picador = pickerId ? state.players.find(p=>p.id===pickerId) : null;
+  const primero = firstId ? state.players.find(p=>p.id===firstId) : null;
   html += `
   <div class="card">
     <h2 style="font-size:16px;margin-bottom:10px;">Sesión</h2>
     <div class="player-add">
       <input type="text" placeholder="Anfitrión (¿en casa de quién jugamos?)" value="${esc(state.anfitrion||'')}" oninput="setAnfitrion(this.value)">
     </div>
-    ${repartidor ? `<div class="subtitle" style="margin-top:8px;">🃏 Repartidor de esta partida: <b style="color:var(--cream);">${esc(repartidor.name)}</b></div>` : ''}
+    ${repartidor ? `<div class="subtitle" style="margin-top:8px;">🃏 Reparte: <b style="color:var(--cream);">${esc(repartidor.name)}</b></div>` : ''}
+    ${picador ? `<div class="subtitle" style="margin-top:4px;">✂️ Pica: <b style="color:var(--cream);">${esc(picador.name)}</b> <button class="link-btn" style="margin-left:6px;" onclick="togglePickDir()">cambiar sentido (${state.pickDir===1?'siguiente':'anterior'} en la lista)</button></div>` : ''}
+    ${primero ? `<div class="subtitle" style="margin-top:4px;">▶️ Juega primero: <b style="color:var(--cream);">${esc(primero.name)}</b></div>` : ''}
     ${state.startedAt ? `<div class="subtitle" style="margin-top:4px;">Partida iniciada: ${new Date(state.startedAt).toLocaleString('es',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}</div>` : ''}
     ${!state.citaId ? `<button class="btn btn-gold" style="width:100%;margin-top:10px;" onclick="startNuevaCita()">🃏 Iniciar cita (elegir repartidor inicial)</button>` : `<button class="link-btn" style="margin-top:8px;" onclick="startNuevaCita()">Empezar otra cita nueva (otro día / otra casa)</button>`}
   </div>`;
@@ -771,8 +866,10 @@ function render(){
         queda. Luego el repartidor reparte 11 cartas a cada jugador, excepto al
         jugador de su izquierda, que recibe 11 menos los MONO que ya se quedó
         al picar. Al terminar cada partida, quien ganó (menos puntos) pasa a
-        ser el repartidor de la siguiente, y así sucesivamente durante toda la
-        cita.
+        ser el repartidor de la siguiente y todos los jugadores se desplazan
+        (mismo orden de asiento, el repartidor queda primero en la lista).
+        Pica el jugador a la izquierda del repartidor (✂️) y juega primero el
+        de su derecha (▶️). Así sucesivamente durante toda la cita.
       </div>
     </div>
   </div>`;
@@ -798,7 +895,7 @@ function render(){
       state.players.forEach((p,idx)=>{
         html += `
         <div class="player-chip">
-          <span class="name">${p.id===state.repartidorId?'🃏 ':''}${esc(p.name)}</span>
+          <span class="name">${roleIcons(p.id, dealerId, pickerId, firstId)}${esc(p.name)}</span>
           <div style="display:flex;align-items:center;gap:2px;">
             <button onclick="movePlayer(${idx},-1)" title="Subir" ${idx===0?'disabled':''} style="opacity:${idx===0?0.3:1};">▲</button>
             <button onclick="movePlayer(${idx},1)" title="Bajar" ${idx===state.players.length-1?'disabled':''} style="opacity:${idx===state.players.length-1?0.3:1};">▼</button>
@@ -847,7 +944,7 @@ function render(){
         const isOpen = calcOpenFor && calcOpenFor.roundId===activeRound.id && calcOpenFor.playerId===p.id;
         html += `
         <div class="player-score-row">
-          <span class="pname">${esc(p.name)}</span>
+          <span class="pname">${roleIcons(p.id, dealerId, pickerId, firstId)}${esc(p.name)}</span>
           <span class="pscore ${val===undefined?'empty':''}">${val===undefined?'sin anotar':val}</span>
           <button class="edit-btn" onclick="${isOpen?'closeCalc()':`openCalc('${activeRound.id}','${p.id}')`}">${isOpen?'cerrar':(val===undefined?'anotar':'editar')}</button>
         </div>`;
@@ -878,7 +975,7 @@ function render(){
     html += `<div class="card">`;
     html += `<h2 style="font-size:16px;margin-bottom:10px;">Marcador</h2>`;
     html += `<table class="score-table ${many?'compact':''}"><thead><tr><th class="rowlabel">Jugada</th>`;
-    state.players.forEach(p=> html += `<th title="${esc(p.name)}">${esc(abbrevName(p.name, nameLen))}</th>`);
+    state.players.forEach(p=> html += `<th title="${esc(p.name)}">${roleIcons(p.id, dealerId, pickerId, firstId).trim()}<br>${esc(abbrevName(p.name, nameLen))}</th>`);
     html += `</tr></thead><tbody>`;
     state.rounds.forEach(r=>{
       html += `<tr><td class="rowlabel">${esc(abbrevName(r.name, many?6:99))}</td>`;
@@ -898,53 +995,95 @@ function render(){
     html += `</div>`;
   }
 
-  // Historial de partidas guardadas, agrupado por Cita
+  // Historial de partidas guardadas: plegable, con opción de agrupar por cita
   if(state.history.length){
-    const citaGroups = [];
-    state.history.forEach(g=>{
-      const key = g.citaId || ('legacy|' + (g.anfitrion||'—') + '|' + new Date(g.date).toDateString());
-      let grp = citaGroups.find(x=>x.key===key);
-      if(!grp){ grp = {key, anfitrion: g.anfitrion, citaId: g.citaId||null, games:[]}; citaGroups.push(grp); }
-      grp.games.push(g);
-    });
+    const histOpen = !!state.histOpen;
+    const grouped = state.histGroup !== false;
+    const fmtDate = d => new Date(d).toLocaleDateString('es', {day:'2-digit',month:'2-digit',year:'2-digit'});
 
-    html += `<div class="card"><h2 style="font-size:16px;margin-bottom:6px;">Historial por cita</h2>
-      <div class="subtitle" style="margin-bottom:6px;">Cada cita agrupa las partidas jugadas en una misma reunión. Toca el nombre de una partida para cambiarlo.</div>`;
-
-    citaGroups.forEach(grp=>{
-      const firstDate = new Date(grp.games[grp.games.length-1].date).toLocaleDateString('es', {day:'2-digit',month:'2-digit',year:'2-digit'});
-      const lastDate = new Date(grp.games[0].date).toLocaleDateString('es', {day:'2-digit',month:'2-digit',year:'2-digit'});
-      const rangeStr = firstDate===lastDate ? firstDate : `${firstDate} → ${lastDate}`;
-      html += `<div style="margin-top:14px;padding-top:12px;border-top:2px solid rgba(217,164,65,0.3);">
-        <div style="font-weight:800;color:var(--gold);">${grp.anfitrion?esc(grp.anfitrion):'Sin anfitrión'} · ${rangeStr}</div>`;
-
-      grp.games.slice().reverse().forEach(g=>{
-        const totals = gameTotals(g);
-        const dateStr = new Date(g.date).toLocaleDateString('es', {day:'2-digit',month:'2-digit',year:'2-digit'});
-        const ranked = g.players.slice().sort((a,b)=> totals[a.id]-totals[b.id]);
-        const dealer = g.repartidorId ? g.players.find(p=>p.id===g.repartidorId) : null;
-        let durStr = '';
-        if(g.startedAt && g.endedAt){
-          const s = new Date(g.startedAt), e = new Date(g.endedAt);
-          const hhmm = d => d.toLocaleTimeString('es', {hour:'2-digit', minute:'2-digit'});
-          durStr = `${hhmm(s)}–${hhmm(e)}`;
-        }
-        html += `
-        <div style="padding:10px 0;border-top:1px solid rgba(250,243,227,0.12);">
-          <div style="display:flex;gap:8px;align-items:center;">
-            <input type="text" value="${esc(g.name)}" oninput="renameHistoryName('${g.id}', this.value)" style="flex:1;">
-            <span class="subtitle" style="white-space:nowrap;">${dateStr}</span>
-            <button onclick="deleteHistoryItem('${g.id}')" style="background:none;border:none;color:var(--brick);font-size:16px;cursor:pointer;padding:2px 4px;">✕</button>
-          </div>
-          ${(dealer || durStr) ? `<div class="subtitle" style="margin-top:4px;">${dealer?`🃏 Repartió: ${esc(dealer.name)}`:''}${dealer && durStr?' · ':''}${durStr}</div>` : ''}
-          <div class="chip-row" style="margin-top:8px;">`;
-        ranked.forEach((p,i)=>{
-          html += `<span class="chip">${i===0?'👑 ':''}${esc(p.name)} <span class="pts">${totals[p.id]||0}</span></span>`;
-        });
-        html += `</div></div>`;
+    const renderGame = (g, showHost) => {
+      const totals = gameTotals(g);
+      const ranked = g.players.slice().sort((a,b)=> totals[a.id]-totals[b.id]);
+      const dealerHid = g.repartidorId || null;
+      const dir = g.pickDir===1 ? 1 : -1;
+      const pickerHid = g.picadorId || pickerIdFor(dealerHid, g.players, dir);
+      const firstHid = pickerIdFor(dealerHid, g.players, dir===1 ? -1 : 1);
+      const dealer = dealerHid ? g.players.find(p=>p.id===dealerHid) : null;
+      const picker = pickerHid ? g.players.find(p=>p.id===pickerHid) : null;
+      let durStr = '';
+      if(g.startedAt && g.endedAt){
+        const s0 = new Date(g.startedAt), e0 = new Date(g.endedAt);
+        const hhmm = d => d.toLocaleTimeString('es', {hour:'2-digit', minute:'2-digit'});
+        durStr = `${hhmm(s0)}–${hhmm(e0)}`;
+      }
+      const meta = [];
+      if(showHost) meta.push(g.anfitrion ? esc(g.anfitrion) : 'Sin anfitrión');
+      if(dealer) meta.push(`🃏 Repartió: ${esc(dealer.name)}`);
+      if(picker) meta.push(`✂️ Picó: ${esc(picker.name)}`);
+      const first = firstHid ? g.players.find(p=>p.id===firstHid) : null;
+      if(first) meta.push(`▶️ Empezó: ${esc(first.name)}`);
+      if(durStr) meta.push(durStr);
+      let out = `
+      <div style="padding:10px 0;border-top:1px solid rgba(250,243,227,0.12);">
+        <div style="display:flex;gap:8px;align-items:center;">
+          <input type="text" value="${esc(g.name)}" oninput="renameHistoryName('${g.id}', this.value)" style="flex:1;">
+          <span class="subtitle" style="white-space:nowrap;">${fmtDate(g.date)}</span>
+          <button onclick="deleteHistoryItem('${g.id}')" style="background:none;border:none;color:var(--brick);font-size:16px;cursor:pointer;padding:2px 4px;">✕</button>
+        </div>
+        ${meta.length ? `<div class="subtitle" style="margin-top:4px;">${meta.join(' · ')}</div>` : ''}
+        <div class="chip-row" style="margin-top:8px;">`;
+      ranked.forEach((p,i)=>{
+        out += `<span class="chip">${i===0?'👑 ':''}${roleIcons(p.id, dealerHid, pickerHid, firstHid)}${esc(p.name)} <span class="pts">${totals[p.id]||0}</span></span>`;
       });
-      html += `</div>`;
-    });
+      out += `</div></div>`;
+      return out;
+    };
+
+    html += `<div class="card">
+      <div class="legend-toggle" onclick="toggleHistOpen()">
+        <h2 style="font-size:16px;">Historial <span class="subtitle" style="font-weight:400;">(${state.history.length} ${state.history.length===1?'partida':'partidas'})</span></h2>
+        <span class="chev ${histOpen?'open':''}">▾</span>
+      </div>`;
+
+    if(histOpen){
+      html += `<div style="margin-top:10px;display:flex;align-items:center;justify-content:space-between;gap:8px;">
+        <div class="subtitle">Toca el nombre de una partida para cambiarlo.</div>
+        <button class="btn ${grouped?'btn-gold':'btn-outline'}" style="padding:6px 12px;font-size:13px;white-space:nowrap;" onclick="toggleHistGroup()">${grouped?'✓ Agrupar por cita':'Agrupar por cita'}</button>
+      </div>`;
+
+      if(grouped){
+        const citaGroups = [];
+        state.history.forEach(g=>{
+          const key = g.citaId || ('legacy|' + (g.anfitrion||'—') + '|' + new Date(g.date).toDateString());
+          let grp = citaGroups.find(x=>x.key===key);
+          if(!grp){ grp = {key, anfitrion: g.anfitrion, citaId: g.citaId||null, games:[]}; citaGroups.push(grp); }
+          grp.games.push(g);
+        });
+        const openMap = state.histOpenGroups || {};
+        citaGroups.forEach(grp=>{
+          const firstDate = fmtDate(grp.games[grp.games.length-1].date);
+          const lastDate = fmtDate(grp.games[0].date);
+          const rangeStr = firstDate===lastDate ? firstDate : `${firstDate} → ${lastDate}`;
+          const isOpen = !!openMap[grp.key];
+          const keyAttr = encodeURIComponent(grp.key).replace(/'/g,'%27');
+          html += `<div style="margin-top:12px;padding-top:10px;border-top:2px solid rgba(217,164,65,0.3);">
+            <div class="legend-toggle" onclick="toggleHistCita('${keyAttr}')">
+              <div style="font-weight:800;color:var(--gold);">${grp.anfitrion?esc(grp.anfitrion):'Sin anfitrión'} · ${rangeStr}
+                <span class="subtitle" style="font-weight:400;">(${grp.games.length} ${grp.games.length===1?'partida':'partidas'})</span></div>
+              <span class="chev ${isOpen?'open':''}">▾</span>
+            </div>`;
+          if(isOpen){
+            grp.games.slice().reverse().forEach(g=>{ html += renderGame(g, false); });
+          }
+          html += `</div>`;
+        });
+      } else {
+        // Lista plana: todas las partidas, de la más reciente a la más antigua
+        html += `<div style="margin-top:6px;">`;
+        state.history.forEach(g=>{ html += renderGame(g, true); });
+        html += `</div>`;
+      }
+    }
     html += `</div>`;
 
     const stats = computeStats();
@@ -987,7 +1126,7 @@ function render(){
     </div>`;
   }
 
-  app.innerHTML = html;
+  setAppHTML(app, html);
 }
 
 function renderCalc(){
@@ -1093,12 +1232,14 @@ function goToHub(){
   currentGame = null;
   try{ localStorage.setItem(CURRENT_GAME_KEY, ''); }catch(e){}
   renderShell();
+  window.scrollTo(0, 0);
 }
 
 function openGame(name){
   currentGame = name;
   try{ localStorage.setItem(CURRENT_GAME_KEY, name); }catch(e){}
   renderShell();
+  window.scrollTo(0, 0);
 }
 
 /* ---------------- PIN gate ---------------- */
@@ -1481,7 +1622,7 @@ function renderSequence(){
     html += `</tbody></table></div></div>`;
   }
 
-  appRoot().innerHTML = html;
+  setAppHTML(appRoot(), html);
 }
 
 /* ---------------- Arranque ---------------- */
