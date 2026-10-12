@@ -266,6 +266,12 @@ let voiceMode = 'hold';   // 'hold' = mantener presionado | 'toggle' = tocar par
 let voiceTimer = null;
 let voiceMaxTimer = null;
 let voicePressAt = 0;
+let voiceRecObj = null;       // instancia ÚNICA de reconocimiento (se reutiliza entre dictados)
+let voiceEngineOn = false;    // true entre start() y end
+let voiceSessionActive = false;
+let voiceStartTries = 0;
+let voiceRestartTimer = null;
+let voiceIgnoreEnd = false;   // ignora el "end" provocado por nuestro propio abort()
 
 /* ---------------- Cuadros propios (reemplazan prompt/confirm/alert nativos,
    que no funcionan de forma confiable dentro de apps añadidas a la pantalla
@@ -454,14 +460,26 @@ function parseSpokenNumber(text){
 function voiceSR(){ return window.SpeechRecognition || window.webkitSpeechRecognition || null; }
 const IS_IOS = /iP(hone|ad|od)/.test(navigator.userAgent || '') || (navigator.platform==='MacIntel' && navigator.maxTouchPoints>1);
 
-function stopVoiceRec(){
-  if(voiceRec){
-    try{ voiceRec.onresult = voiceRec.onerror = voiceRec.onend = voiceRec.onstart = voiceRec.onaudiostart = null; voiceRec.abort(); }catch(e){}
-    voiceRec = null;
-  }
-  voiceHolding = false;
+function voiceLog(msg){
+  if(!voice) return;
+  if(!voice.log) voice.log = [];
+  voice.log.push(msg);
+  if(voice.log.length > 12) voice.log.shift();
+  const d = document.getElementById('voice-debug');
+  if(d) d.textContent = 'Diagnóstico: ' + voice.log.join(' → ');
+}
+
+function voiceClearTimers(){
   if(voiceTimer){ clearTimeout(voiceTimer); voiceTimer = null; }
   if(voiceMaxTimer){ clearTimeout(voiceMaxTimer); voiceMaxTimer = null; }
+  if(voiceRestartTimer){ clearTimeout(voiceRestartTimer); voiceRestartTimer = null; }
+}
+
+function stopVoiceRec(){
+  voiceSessionActive = false;
+  voiceHolding = false;
+  voiceClearTimers();
+  if(voiceRecObj && voiceEngineOn){ try{ voiceRecObj.abort(); }catch(e){} }
 }
 
 function cancelVoice(silent){
@@ -473,7 +491,7 @@ function cancelVoice(silent){
 function openVoice(roundId, playerId){
   stopVoiceRec();
   calcOpenFor = null;
-  voice = {roundId, playerId, status: voiceSR() ? 'idle' : 'unsupported', transcript:'', value:null, msg:'', errCode:''};
+  voice = {roundId, playerId, status: voiceSR() ? 'idle' : 'unsupported', transcript:'', value:null, msg:'', errCode:'', log:[]};
   render();
 }
 
@@ -509,7 +527,6 @@ function voiceRelease(kind){
   if(!voiceHolding || voiceMode!=='hold') return;
   const held = Date.now() - voicePressAt;
   if(kind==='cancel' || held < 600){
-    // toque corto, o gesto interrumpido por el sistema (p. ej. aviso de permiso): seguir escuchando
     voiceMode = 'toggle';
     voiceUI('live', null);
     return;
@@ -522,91 +539,143 @@ function voiceKeyboard(){
   if(i){ i.focus(); try{ i.select(); }catch(e){} }
 }
 
-function voiceBegin(mode){
-  if(!voice || voiceHolding) return;
-  const SR = voiceSR();
-  if(!SR){ voice.status = 'unsupported'; render(); return; }
-  voiceMode = mode;
-  voiceHolding = true;
-  voice.finished = false; voice.carry = ''; voice.finalText = ''; voice.interimText = '';
-  voice.lastAlts = null; voice.restarts = 0; voice.msg = ''; voice.errCode = '';
-  voiceUI('prep', '');
-  if(voiceMaxTimer) clearTimeout(voiceMaxTimer);
-  voiceMaxTimer = setTimeout(()=>{ if(voiceHolding) voiceHoldEnd(); }, 15000); // seguridad: máximo 15 s
-  voiceBeginRec(SR);
+function voiceGetRec(SR){
+  if(voiceRecObj) return voiceRecObj;
+  const rec = new SR();
+  const nl = (navigator.language || '').toLowerCase();
+  rec.lang = nl.indexOf('es')===0 ? navigator.language : 'es-ES';
+  rec.continuous = !IS_IOS;
+  rec.interimResults = true;
+  rec.maxAlternatives = 3;
+  rec.onstart = ()=>{
+    voiceEngineOn = true;
+    if(voiceSessionActive){ voiceLog('inicio'); if(voiceHolding) voiceUI('live', null); }
+  };
+  rec.onaudiostart = ()=>{ if(voiceSessionActive) voiceLog('audio'); };
+  rec.onspeechstart = ()=>{ if(voiceSessionActive) voiceLog('voz'); };
+  rec.onnomatch = ()=>{ if(voiceSessionActive) voiceLog('sin coincidencia'); };
+  rec.onresult = (e)=>{
+    if(!voiceSessionActive || !voice) return;
+    let fin = '', inter = '', alts = null;
+    for(let i=0;i<e.results.length;i++){
+      const r = e.results[i];
+      const t = (r[0] && r[0].transcript) || '';
+      if(r.isFinal){ fin += t + ' '; alts = Array.prototype.map.call(r, x=>x.transcript); }
+      else inter += t + ' ';
+    }
+    voice.finalText = fin; voice.interimText = inter;
+    if(alts) voice.lastAlts = alts;
+    voiceLog('texto');
+    voiceUI(voiceHolding ? 'live' : 'proc', ((voice.carry||'') + fin + inter).trim());
+  };
+  rec.onerror = (e)=>{
+    if(!voiceSessionActive || !voice) return;
+    const code = (e && e.error) || 'desconocido';
+    voice.errCode = code;
+    voiceLog('error:' + code);
+    if(code==='not-allowed' || code==='service-not-allowed'){
+      if(voice.restarts>0) voiceFinish(); else voiceFinish('denied');
+    } else if(code==='no-speech' || code==='aborted'){
+      /* sigue: se reinicia en "end" mientras se mantenga la escucha */
+    } else {
+      voiceFinish('error');
+    }
+  };
+  rec.onend = ()=>{
+    voiceEngineOn = false;
+    if(voiceIgnoreEnd){ voiceIgnoreEnd = false; return; }
+    if(!voiceSessionActive || !voice) return;
+    voiceLog('fin');
+    if(voiceHolding && voice.restarts < 12){
+      voice.carry = (voice.carry||'') + (voice.finalText || voice.interimText || '') + ' ';
+      voice.finalText = ''; voice.interimText = ''; voice.restarts++;
+      voiceRestartTimer = setTimeout(voiceStartEngine, 300);   // pequeña pausa antes de volver a escuchar
+    } else {
+      voiceFinish();
+    }
+  };
+  voiceRecObj = rec;
+  return rec;
 }
 
-function voiceBeginRec(SR){
-  try{
-    const rec = new SR();
-    const nl = (navigator.language || '').toLowerCase();
-    rec.lang = nl.indexOf('es')===0 ? navigator.language : 'es-ES';
-    rec.continuous = !IS_IOS;          // en iPhone funciona mejor por tramos; se reinicia solo mientras sigas
-    rec.interimResults = true;
-    rec.maxAlternatives = 3;
-    rec.onstart = rec.onaudiostart = ()=>{ if(voice && voiceHolding) voiceUI('live', null); };
-    rec.onresult = (e)=>{
-      if(!voice) return;
-      let fin = '', inter = '', alts = null;
-      for(let i=0;i<e.results.length;i++){
-        const r = e.results[i];
-        const t = (r[0] && r[0].transcript) || '';
-        if(r.isFinal){ fin += t + ' '; alts = Array.prototype.map.call(r, x=>x.transcript); }
-        else inter += t + ' ';
-      }
-      voice.finalText = fin; voice.interimText = inter;
-      if(alts) voice.lastAlts = alts;
-      voiceUI(voiceHolding ? 'live' : 'proc', ((voice.carry||'') + fin + inter).trim());
-    };
-    rec.onerror = (e)=>{
-      if(!voice || voice.finished) return;
-      const code = (e && e.error) || 'desconocido';
-      voice.errCode = code;
-      if(code==='not-allowed' || code==='service-not-allowed'){
-        if(voice.restarts>0) voiceFinish(); else voiceFinish('denied');
-      } else if(code==='no-speech' || code==='aborted'){
-        /* sigue: se reinicia en onend mientras se mantenga la escucha */
-      } else {
-        voiceFinish('error');
-      }
-    };
-    rec.onend = ()=>{
-      if(!voice || voice.finished) return;
-      if(voiceHolding && voice.restarts < 12){
-        voice.carry = (voice.carry||'') + (voice.finalText || voice.interimText || '') + ' ';
-        voice.finalText = ''; voice.interimText = ''; voice.restarts++;
-        voiceRec = null;
-        voiceBeginRec(SR);   // el sistema cortó por un silencio: seguir escuchando
-      } else {
-        voiceFinish();
-      }
-    };
-    voiceRec = rec;
-    rec.start();
-  }catch(err){
-    if(voice) voice.errCode = (err && err.name) || 'start';
-    voiceFinish('error');
+function voiceStartEngine(){
+  voiceRestartTimer = null;
+  if(!voiceSessionActive || !voice) return;
+  const SR = voiceSR();
+  if(!SR){ voiceFinish('unsupported'); return; }
+  const rec = voiceGetRec(SR);
+  if(voiceEngineOn){
+    // el dictado anterior todavía no terminó: cortarlo y esperar antes de empezar
+    if(voiceStartTries >= 3){
+      rec.onstart = rec.onresult = rec.onerror = rec.onend = rec.onaudiostart = rec.onspeechstart = rec.onnomatch = null;
+      try{ rec.abort(); }catch(e){}
+      voiceRecObj = null; voiceEngineOn = false; voiceIgnoreEnd = false; voiceStartTries = 0;
+      voiceLog('instancia nueva');
+      voiceStartEngine();
+      return;
+    }
+    voiceStartTries++;
+    voiceIgnoreEnd = true;
+    voiceLog('esperando');
+    try{ rec.abort(); }catch(e){}
+    voiceRestartTimer = setTimeout(voiceStartEngine, 350);
+    return;
   }
+  try{
+    voiceIgnoreEnd = false;
+    rec.start();
+    voiceEngineOn = true;
+    voiceStartTries = 0;
+  }catch(err){
+    if(voiceStartTries++ < 3){
+      voiceEngineOn = true;     // probablemente sigue ocupado: se corta y se reintenta
+      voiceRestartTimer = setTimeout(voiceStartEngine, 350);
+    } else {
+      if(voice) voice.errCode = (err && err.name) || 'start';
+      voiceFinish('error');
+    }
+  }
+}
+
+function voiceBegin(mode){
+  if(!voice || voiceHolding) return;
+  if(!voiceSR()){ voice.status = 'unsupported'; render(); return; }
+  voiceMode = mode;
+  voiceHolding = true;
+  voiceSessionActive = true;
+  voiceStartTries = 0;
+  voice.finished = false; voice.carry = ''; voice.finalText = ''; voice.interimText = '';
+  voice.lastAlts = null; voice.restarts = 0; voice.msg = ''; voice.errCode = ''; voice.log = [];
+  voiceUI('prep', '');
+  voiceLog('toque');
+  if(voiceMaxTimer) clearTimeout(voiceMaxTimer);
+  voiceMaxTimer = setTimeout(()=>{ if(voiceHolding) voiceHoldEnd(); }, 15000);   // seguridad: máximo 15 s
+  voiceStartEngine();
 }
 
 function voiceHoldEnd(){
   if(!voiceHolding || !voice) return;
   voiceHolding = false;
   if(voiceMaxTimer){ clearTimeout(voiceMaxTimer); voiceMaxTimer = null; }
+  if(voiceRestartTimer){ clearTimeout(voiceRestartTimer); voiceRestartTimer = null; }
   voiceUI('proc', null);
-  if(voiceRec){ try{ voiceRec.stop(); }catch(e){} }
-  if(voiceTimer) clearTimeout(voiceTimer);
-  voiceTimer = setTimeout(()=>voiceFinish(), 1500); // por si el sistema no avisa al terminar
+  voiceLog('terminar');
+  if(voiceRecObj && voiceEngineOn){
+    try{ voiceRecObj.stop(); }catch(e){}
+    if(voiceTimer) clearTimeout(voiceTimer);
+    voiceTimer = setTimeout(()=>voiceFinish(), 1500);   // por si el sistema no avisa al terminar
+  } else {
+    voiceFinish();
+  }
 }
 
 function voiceFinish(forceStatus){
   if(!voice || voice.finished) return;
   voice.finished = true;
-  const rec = voiceRec;
-  voiceRec = null; voiceHolding = false;
-  if(voiceTimer){ clearTimeout(voiceTimer); voiceTimer = null; }
-  if(voiceMaxTimer){ clearTimeout(voiceMaxTimer); voiceMaxTimer = null; }
-  if(rec){ try{ rec.onresult = rec.onerror = rec.onend = rec.onstart = rec.onaudiostart = null; rec.abort(); }catch(e){} }
+  voiceSessionActive = false;
+  voiceHolding = false;
+  voiceClearTimers();
+  if(voiceRecObj && voiceEngineOn){ try{ voiceRecObj.stop(); }catch(e){} }
   if(forceStatus){ voice.status = forceStatus; render(); return; }
   const text = ((voice.carry||'') + (voice.finalText||'') + (voice.interimText||'')).replace(/\s+/g,' ').trim();
   let val = parseSpokenNumber(text);
@@ -617,7 +686,7 @@ function voiceFinish(forceStatus){
   voice.value = val;
   voice.draft = undefined;
   voice.status = 'result';
-  voice.msg = text ? '' : 'No te escuché. Toca el botón, espera a que diga "Escuchando…" y habla.';
+  voice.msg = text ? '' : 'No capté nada. Si pasa seguido, usa el botón ⌨️ de abajo: es el dictado del propio teléfono.';
   render();
 }
 
@@ -647,23 +716,26 @@ function renderVoice(){
   const st = voice.status;
   const canHold = st!=='unsupported' && st!=='denied';
   const hasResult = st==='result';
+  const failed = st==='error' || st==='denied' || st==='unsupported' || (hasResult && voice.value===null);
   let msg;
   if(st==='unsupported') msg = 'Este navegador no permite dictado desde aquí. Usa el botón ⌨️ de abajo y el micrófono 🎤 del teclado, o escribe el número.';
-  else if(st==='denied') msg = 'El iPhone no dejó usar el dictado de voz aquí. Revisa en Ajustes: General → Teclado → “Activar dictado”, y Privacidad y seguridad → Micrófono y Reconocimiento de voz → Safari. Si usas el icono de la pantalla de inicio, prueba abriendo la página en Safari. Mientras tanto, usa el botón ⌨️ de abajo.';
+  else if(st==='denied') msg = 'El iPhone no dejó usar el dictado de voz aquí. Revisa en Ajustes: General → Teclado → “Activar dictado”, y en Safari (aA → Ajustes del sitio web) permite el Micrófono. Mientras tanto, usa el botón ⌨️ de abajo.';
   else if(st==='error') msg = `No se pudo usar el dictado (${esc(voice.errCode||'error')}). Prueba otra vez o usa el botón ⌨️ de abajo.`;
   else if(hasResult){
     if(voice.value!==null) msg = `Dijiste: “${esc(voice.transcript)}”`;
     else msg = voice.msg ? esc(voice.msg) : (voice.transcript ? `No entendí “${esc(voice.transcript)}”. Inténtalo de nuevo.` : 'No entendí el número.');
   } else msg = 'Toca el botón una vez para empezar y otra para terminar, o mantenlo presionado mientras hablas. Ej: “ciento quince” o “menos cincuenta”.';
   const shown = voice.draft!==undefined ? voice.draft : (voice.value===null ? '' : String(voice.value));
+  const dbg = (voice.log && voice.log.length) ? 'Diagnóstico: ' + esc(voice.log.join(' → ')) : '';
   return `<div class="calc" style="margin-top:6px;">
     <div style="font-weight:700;margin-bottom:6px;">Puntaje de ${name}</div>
     <div class="subtitle" style="margin-bottom:10px;">${msg}</div>
     ${canHold ? `
     <button id="voice-hold" class="hold-btn" onpointerdown="voiceHoldStart(event)" oncontextmenu="return false;">🎤 ${hasResult?'Volver a dictar':'Toca o mantén presionado y habla'}</button>
     <div id="voice-heard" class="subtitle" style="text-align:center;min-height:18px;margin-top:6px;"></div>` : ''}
-    <button class="btn btn-outline" style="width:100%;margin-top:6px;" onclick="voiceKeyboard()">⌨️ Dictar con el teclado del teléfono</button>
-    <div class="calc-manual" style="margin-top:12px;">
+    <button class="btn ${failed?'btn-gold':'btn-outline'}" style="width:100%;margin-top:6px;" onclick="voiceKeyboard()">⌨️ Dictar con el teclado del teléfono</button>
+    <div id="voice-debug" class="subtitle" style="font-size:11px;opacity:.7;margin-top:6px;">${dbg}</div>
+    <div class="calc-manual" style="margin-top:10px;">
       <label>Puntaje:</label>
       <input id="voice-input" type="text" inputmode="text" autocomplete="off" placeholder="—" value="${esc(shown)}" oninput="voiceDraft(this.value)" style="font-size:20px;font-weight:800;text-align:center;">
     </div>
