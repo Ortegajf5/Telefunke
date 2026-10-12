@@ -148,6 +148,14 @@
     border-radius:10px;padding:7px 12px;font-size:13px;font-weight:700;cursor:pointer;
   }
 
+  .hold-btn{
+    display:block;width:100%;padding:18px 10px;border:none;border-radius:16px;
+    background:var(--gold);color:var(--felt-900);font-size:17px;font-weight:800;cursor:pointer;
+    -webkit-user-select:none;user-select:none;-webkit-touch-callout:none;touch-action:none;
+    -webkit-tap-highlight-color:transparent;
+  }
+  .hold-btn.listening{background:var(--brick);color:var(--cream);}
+
   /* Calculator panel */
   .calc{
     margin-top:8px;background:var(--felt-800);
@@ -253,6 +261,9 @@ let calcSpecials = {picadas:0, relancino:0};
 let calcManual = null;    // manual override for CARD points only (not specials)
 let voice = null;         // {roundId, playerId, status, transcript, value, msg}
 let voiceRec = null;      // objeto de reconocimiento de voz en curso
+let voiceHolding = false; // true mientras se mantiene presionado (o en modo toque)
+let voiceMode = 'hold';   // 'hold' = mantener presionado | 'toggle' = tocar para empezar/terminar
+let voiceTimer = null;
 
 /* ---------------- Cuadros propios (reemplazan prompt/confirm/alert nativos,
    que no funcionan de forma confiable dentro de apps añadidas a la pantalla
@@ -438,11 +449,15 @@ function parseSpokenNumber(text){
   return neg ? -total : total;
 }
 
+function voiceSR(){ return window.SpeechRecognition || window.webkitSpeechRecognition || null; }
+
 function stopVoiceRec(){
   if(voiceRec){
-    try{ voiceRec.onresult = voiceRec.onerror = voiceRec.onend = null; voiceRec.abort(); }catch(e){}
+    try{ voiceRec.onresult = voiceRec.onerror = voiceRec.onend = voiceRec.onstart = voiceRec.onaudiostart = null; voiceRec.abort(); }catch(e){}
     voiceRec = null;
   }
+  voiceHolding = false;
+  if(voiceTimer){ clearTimeout(voiceTimer); voiceTimer = null; }
 }
 
 function cancelVoice(silent){
@@ -451,58 +466,134 @@ function cancelVoice(silent){
   if(!silent) render();
 }
 
-function startVoice(roundId, playerId){
+function openVoice(roundId, playerId){
   stopVoiceRec();
   calcOpenFor = null;
-  voice = {roundId, playerId, status:'listening', transcript:'', value:null, msg:''};
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  voice = {roundId, playerId, status: voiceSR() ? 'idle' : 'unsupported', transcript:'', value:null, msg:''};
+  render();
+}
+
+/* Actualiza los botones SIN volver a dibujar la pantalla (así el dedo no pierde el botón) */
+function voiceUI(stateName, heard){
+  const hold = document.getElementById('voice-hold');
+  const tog = document.getElementById('voice-toggle');
+  const txt = {
+    prep: '⏳ Preparando… espera un momento',
+    live: voiceMode==='hold' ? '🎙️ Habla ahora… suelta al terminar' : '🎙️ Escuchando…',
+    proc: '⏳ Procesando…'
+  }[stateName];
+  if(hold){
+    hold.classList.toggle('listening', stateName==='prep' || stateName==='live');
+    if(txt) hold.textContent = txt;
+  }
+  if(tog && voiceMode==='toggle' && stateName!=='idle'){
+    tog.textContent = stateName==='live' ? '⏹ Toca aquí para terminar' : txt;
+  }
+  if(heard!==null && heard!==undefined){
+    const h = document.getElementById('voice-heard');
+    if(h) h.textContent = heard ? '“' + heard + '”' : '';
+  }
+}
+
+function voiceHoldStart(ev){ voiceBegin('hold', ev); }
+
+function voiceToggle(){
+  if(voiceHolding && voiceMode==='toggle') voiceHoldEnd();
+  else voiceBegin('toggle');
+}
+
+function voiceBegin(mode, ev){
+  if(ev && ev.preventDefault) ev.preventDefault();
+  if(!voice || voiceHolding) return;
+  const SR = voiceSR();
   if(!SR){ voice.status = 'unsupported'; render(); return; }
+  voiceMode = mode;
+  voiceHolding = true;
+  voice.finished = false; voice.carry = ''; voice.finalText = ''; voice.interimText = '';
+  voice.lastAlts = null; voice.restarts = 0; voice.msg = '';
+  voiceUI('prep', '');
+  voiceBeginRec(SR);
+}
+
+function voiceBeginRec(SR){
   try{
     const rec = new SR();
     const nl = (navigator.language || '').toLowerCase();
     rec.lang = nl.indexOf('es')===0 ? navigator.language : 'es-ES';
-    rec.interimResults = false;
-    rec.continuous = false;
-    rec.maxAlternatives = 4;
+    rec.continuous = true;
+    rec.interimResults = true;
+    rec.maxAlternatives = 3;
+    rec.onstart = rec.onaudiostart = ()=>{ if(voice && voiceHolding) voiceUI('live', null); };
     rec.onresult = (e)=>{
       if(!voice) return;
-      const res = e.results && e.results[e.results.length-1];
-      let first = '', val = null, said = '';
-      if(res){
-        for(let i=0;i<res.length;i++){
-          const tr = (res[i].transcript||'').trim();
-          if(i===0) first = tr;
-          const v = parseSpokenNumber(tr);
-          if(v!==null){ val = v; said = tr; break; }
-        }
+      let fin = '', inter = '', alts = null;
+      for(let i=0;i<e.results.length;i++){
+        const r = e.results[i];
+        const t = (r[0] && r[0].transcript) || '';
+        if(r.isFinal){ fin += t + ' '; alts = Array.prototype.map.call(r, x=>x.transcript); }
+        else inter += t + ' ';
       }
-      voice.transcript = said || first;
-      voice.value = val;
-      voice.status = 'result';
-      voiceRec = null;
-      render();
+      voice.finalText = fin; voice.interimText = inter;
+      if(alts) voice.lastAlts = alts;
+      voiceUI(voiceHolding ? 'live' : 'proc', ((voice.carry||'') + fin + inter).trim());
     };
     rec.onerror = (e)=>{
-      if(!voice) return;
+      if(!voice || voice.finished) return;
       const code = e && e.error;
-      if(code==='not-allowed' || code==='service-not-allowed'){ voice.status = 'denied'; }
-      else if(code==='no-speech' || code==='aborted'){ voice.status = 'result'; voice.msg = 'No te escuché.'; }
-      else { voice.status = 'error'; }
-      voiceRec = null;
-      render();
+      if(code==='not-allowed' || code==='service-not-allowed'){
+        if(voice.restarts>0) voiceFinish(); else voiceFinish('denied');
+      } else if(code==='no-speech' || code==='aborted'){
+        /* sigue: se reinicia en onend mientras se mantenga presionado */
+      } else {
+        voiceFinish('error');
+      }
     };
     rec.onend = ()=>{
-      if(voice && voice.status==='listening'){
-        voice.status = 'result'; voice.msg = 'No te escuché.';
+      if(!voice || voice.finished) return;
+      if(voiceHolding && voice.restarts < 8){
+        // el sistema cortó la escucha por un silencio: seguir escuchando mientras siga presionado
+        voice.carry = (voice.carry||'') + (voice.finalText || voice.interimText || '') + ' ';
+        voice.finalText = ''; voice.interimText = ''; voice.restarts++;
         voiceRec = null;
-        render();
+        voiceBeginRec(SR);
+      } else {
+        voiceFinish();
       }
     };
     voiceRec = rec;
     rec.start();
   }catch(err){
-    voice.status = 'unsupported';
+    voiceFinish('unsupported');
   }
+}
+
+function voiceHoldEnd(){
+  if(!voiceHolding || !voice) return;
+  voiceHolding = false;
+  voiceUI('proc', null);
+  if(voiceRec){ try{ voiceRec.stop(); }catch(e){} }
+  if(voiceTimer) clearTimeout(voiceTimer);
+  voiceTimer = setTimeout(()=>voiceFinish(), 1500); // por si el sistema no avisa al terminar
+}
+
+function voiceFinish(forceStatus){
+  if(!voice || voice.finished) return;
+  voice.finished = true;
+  const rec = voiceRec;
+  voiceRec = null; voiceHolding = false;
+  if(voiceTimer){ clearTimeout(voiceTimer); voiceTimer = null; }
+  if(rec){ try{ rec.onresult = rec.onerror = rec.onend = rec.onstart = rec.onaudiostart = null; rec.abort(); }catch(e){} }
+  if(forceStatus){ voice.status = forceStatus; render(); return; }
+  const text = ((voice.carry||'') + (voice.finalText||'') + (voice.interimText||'')).replace(/\s+/g,' ').trim();
+  let val = parseSpokenNumber(text);
+  if(val===null && voice.lastAlts){
+    for(let i=0;i<voice.lastAlts.length && val===null;i++) val = parseSpokenNumber(voice.lastAlts[i]);
+  }
+  voice.transcript = text;
+  voice.value = val;
+  voice.draft = undefined;
+  voice.status = 'result';
+  voice.msg = text ? '' : 'No te escuché. Mantén presionado el botón y habla.';
   render();
 }
 
@@ -529,36 +620,43 @@ function voiceAssign(){
 function renderVoice(){
   const p = state.players.find(x=>x.id===voice.playerId);
   const name = p ? esc(p.name) : '';
-  const row = (inner)=>`<div class="calc" style="margin-top:6px;">${inner}</div>`;
-  if(voice.status==='listening'){
-    return row(`
-      <div style="display:flex;align-items:center;gap:10px;">
-        <span style="font-size:26px;">🎙️</span>
-        <div style="flex:1;"><b>Escuchando…</b><div class="subtitle">Di el puntaje de ${name}. Ej: "ciento quince" o "menos cincuenta".</div></div>
-      </div>
-      <div class="calc-actions" style="margin-top:12px;"><button class="btn btn-outline" onclick="cancelVoice()">Cancelar</button></div>`);
-  }
-  const unsup = voice.status==='unsupported' || voice.status==='denied' || voice.status==='error';
-  let head = '';
-  if(voice.status==='unsupported') head = `<div class="subtitle" style="margin-bottom:8px;">Este navegador no permite dictado desde aquí. Toca el campo y usa el micrófono 🎤 del teclado del teléfono, o escribe el número.</div>`;
-  else if(voice.status==='denied') head = `<div class="subtitle" style="margin-bottom:8px;">No hay permiso para usar el micrófono. Puedes activarlo en los ajustes del navegador, o usar el micrófono 🎤 del teclado en el campo de abajo.</div>`;
-  else if(voice.status==='error') head = `<div class="subtitle" style="margin-bottom:8px;">No se pudo usar el dictado ahora. Prueba de nuevo, o escribe el número.</div>`;
-  else if(voice.value!==null) head = `<div style="font-size:13px;color:var(--cream-dim);margin-bottom:6px;">Dijiste: “${esc(voice.transcript)}”</div>`;
-  else head = `<div class="subtitle" style="margin-bottom:8px;">${voice.msg ? esc(voice.msg) : (voice.transcript ? `No entendí “${esc(voice.transcript)}”.` : 'No entendí el número.')} Puedes volver a dictar o escribirlo.</div>`;
+  const st = voice.status;
+  const canHold = st!=='unsupported' && st!=='denied';
+  const hasResult = st==='result';
+  let msg;
+  if(st==='unsupported') msg = 'Este navegador no permite dictado desde aquí. Toca el campo de abajo y usa el micrófono 🎤 del teclado del teléfono, o escribe el número.';
+  else if(st==='denied') msg = 'No hay permiso para usar el micrófono. Puedes activarlo en los ajustes del navegador, o usar el micrófono 🎤 del teclado en el campo de abajo.';
+  else if(st==='error') msg = 'No se pudo usar el dictado ahora. Prueba de nuevo, o escribe el número.';
+  else if(hasResult){
+    if(voice.value!==null) msg = `Dijiste: “${esc(voice.transcript)}”`;
+    else msg = voice.msg ? esc(voice.msg) : (voice.transcript ? `No entendí “${esc(voice.transcript)}”. Inténtalo de nuevo.` : 'No entendí el número.');
+  } else msg = 'Mantén presionado el botón, di el puntaje y suéltalo. Ej: “ciento quince” o “menos cincuenta”.';
   const shown = voice.draft!==undefined ? voice.draft : (voice.value===null ? '' : String(voice.value));
-  return row(`
+  return `<div class="calc" style="margin-top:6px;">
     <div style="font-weight:700;margin-bottom:6px;">Puntaje de ${name}</div>
-    ${head}
-    <div class="calc-manual" style="margin-top:0;">
+    <div class="subtitle" style="margin-bottom:10px;">${msg}</div>
+    ${canHold ? `
+    <button id="voice-hold" class="hold-btn" onpointerdown="voiceHoldStart(event)" oncontextmenu="return false;">🎤 ${hasResult?'Mantén presionado para volver a dictar':'Mantén presionado y habla'}</button>
+    <div id="voice-heard" class="subtitle" style="text-align:center;min-height:18px;margin-top:6px;"></div>
+    <div style="text-align:center;"><button id="voice-toggle" class="link-btn" onclick="voiceToggle()">o toca aquí para empezar y toca otra vez para terminar</button></div>` : ''}
+    <div class="calc-manual" style="margin-top:12px;">
+      <label>Puntaje:</label>
       <input id="voice-input" type="text" inputmode="text" autocomplete="off" placeholder="—" value="${esc(shown)}" oninput="voiceDraft(this.value)" style="font-size:20px;font-weight:800;text-align:center;">
     </div>
-    ${voice.msg && voice.value!==null ? `<div class="subtitle" style="margin-top:6px;">${esc(voice.msg)}</div>` : ''}
+    <div class="subtitle" style="margin-top:4px;">¿No capta la voz? Toca el campo y usa el micrófono 🎤 del teclado.</div>
+    ${voice.msg && hasResult && voice.value!==null ? `<div class="subtitle" style="margin-top:6px;">${esc(voice.msg)}</div>` : ''}
     <div class="calc-actions" style="margin-top:12px;">
       <button class="btn btn-outline" onclick="cancelVoice()">Cancelar</button>
-      <button class="btn btn-outline" onclick="startVoice('${voice.roundId}','${voice.playerId}')">🎤 Volver a dictar</button>
       <button class="btn btn-gold" onclick="voiceAssign()">Asignar</button>
-    </div>`);
+    </div>
+  </div>`;
 }
+
+/* Al soltar el dedo en cualquier parte, termina el dictado (modo "mantener presionado") */
+['pointerup','pointercancel','touchend','touchcancel','mouseup'].forEach(t=>{
+  window.addEventListener(t, ()=>{ if(voiceMode==='hold') voiceHoldEnd(); }, {passive:true});
+});
+document.addEventListener('visibilitychange', ()=>{ if(document.hidden && voiceHolding) voiceHoldEnd(); });
 
 function openCalc(roundId, playerId){
   cancelVoice(true);
@@ -1142,7 +1240,7 @@ function render(){
         <div class="player-score-row">
           <span class="pname">${roleIcons(p.id, dealerId, pickerId, firstId)}${esc(p.name)}</span>
           <span class="pscore ${val===undefined?'empty':''}">${val===undefined?'sin anotar':val}</span>
-          <button class="edit-btn" title="Dictar el puntaje" aria-label="Dictar el puntaje de ${esc(p.name)}" style="margin-right:6px;" onclick="startVoice('${activeRound.id}','${p.id}')">🎤</button>
+          <button class="edit-btn" title="Dictar el puntaje" aria-label="Dictar el puntaje de ${esc(p.name)}" style="margin-right:6px;" onclick="openVoice('${activeRound.id}','${p.id}')">🎤</button>
           <button class="edit-btn" onclick="${isOpen?'closeCalc()':`openCalc('${activeRound.id}','${p.id}')`}">${isOpen?'cerrar':(val===undefined?'anotar':'editar')}</button>
         </div>`;
         if(isOpen){
