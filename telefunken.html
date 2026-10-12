@@ -264,6 +264,8 @@ let voiceRec = null;      // objeto de reconocimiento de voz en curso
 let voiceHolding = false; // true mientras se mantiene presionado (o en modo toque)
 let voiceMode = 'hold';   // 'hold' = mantener presionado | 'toggle' = tocar para empezar/terminar
 let voiceTimer = null;
+let voiceMaxTimer = null;
+let voicePressAt = 0;
 
 /* ---------------- Cuadros propios (reemplazan prompt/confirm/alert nativos,
    que no funcionan de forma confiable dentro de apps añadidas a la pantalla
@@ -450,6 +452,7 @@ function parseSpokenNumber(text){
 }
 
 function voiceSR(){ return window.SpeechRecognition || window.webkitSpeechRecognition || null; }
+const IS_IOS = /iP(hone|ad|od)/.test(navigator.userAgent || '') || (navigator.platform==='MacIntel' && navigator.maxTouchPoints>1);
 
 function stopVoiceRec(){
   if(voiceRec){
@@ -458,6 +461,7 @@ function stopVoiceRec(){
   }
   voiceHolding = false;
   if(voiceTimer){ clearTimeout(voiceTimer); voiceTimer = null; }
+  if(voiceMaxTimer){ clearTimeout(voiceMaxTimer); voiceMaxTimer = null; }
 }
 
 function cancelVoice(silent){
@@ -469,25 +473,22 @@ function cancelVoice(silent){
 function openVoice(roundId, playerId){
   stopVoiceRec();
   calcOpenFor = null;
-  voice = {roundId, playerId, status: voiceSR() ? 'idle' : 'unsupported', transcript:'', value:null, msg:''};
+  voice = {roundId, playerId, status: voiceSR() ? 'idle' : 'unsupported', transcript:'', value:null, msg:'', errCode:''};
   render();
 }
 
-/* Actualiza los botones SIN volver a dibujar la pantalla (así el dedo no pierde el botón) */
+/* Actualiza el botón SIN volver a dibujar la pantalla (así el dedo no pierde el botón) */
 function voiceUI(stateName, heard){
   const hold = document.getElementById('voice-hold');
-  const tog = document.getElementById('voice-toggle');
+  const tap = voiceMode==='toggle';
   const txt = {
-    prep: '⏳ Preparando… espera un momento',
-    live: voiceMode==='hold' ? '🎙️ Habla ahora… suelta al terminar' : '🎙️ Escuchando…',
+    prep: tap ? '⏳ Preparando… toca de nuevo para cancelar' : '⏳ Preparando… espera un momento',
+    live: tap ? '🎙️ Escuchando… toca aquí para terminar' : '🎙️ Habla ahora… suelta al terminar',
     proc: '⏳ Procesando…'
   }[stateName];
   if(hold){
     hold.classList.toggle('listening', stateName==='prep' || stateName==='live');
     if(txt) hold.textContent = txt;
-  }
-  if(tog && voiceMode==='toggle' && stateName!=='idle'){
-    tog.textContent = stateName==='live' ? '⏹ Toca aquí para terminar' : txt;
   }
   if(heard!==null && heard!==undefined){
     const h = document.getElementById('voice-heard');
@@ -495,23 +496,43 @@ function voiceUI(stateName, heard){
   }
 }
 
-function voiceHoldStart(ev){ voiceBegin('hold', ev); }
-
-function voiceToggle(){
-  if(voiceHolding && voiceMode==='toggle') voiceHoldEnd();
-  else voiceBegin('toggle');
+/* Un solo botón: toque corto = empieza y sigue escuchando hasta el siguiente toque;
+   mantener presionado = habla mientras lo sostienes y termina al soltar. */
+function voiceHoldStart(ev){
+  if(ev && ev.preventDefault) ev.preventDefault();
+  if(voiceHolding && voiceMode==='toggle'){ voiceHoldEnd(); return; }
+  voicePressAt = Date.now();
+  voiceBegin('hold');
 }
 
-function voiceBegin(mode, ev){
-  if(ev && ev.preventDefault) ev.preventDefault();
+function voiceRelease(kind){
+  if(!voiceHolding || voiceMode!=='hold') return;
+  const held = Date.now() - voicePressAt;
+  if(kind==='cancel' || held < 600){
+    // toque corto, o gesto interrumpido por el sistema (p. ej. aviso de permiso): seguir escuchando
+    voiceMode = 'toggle';
+    voiceUI('live', null);
+    return;
+  }
+  voiceHoldEnd();
+}
+
+function voiceKeyboard(){
+  const i = document.getElementById('voice-input');
+  if(i){ i.focus(); try{ i.select(); }catch(e){} }
+}
+
+function voiceBegin(mode){
   if(!voice || voiceHolding) return;
   const SR = voiceSR();
   if(!SR){ voice.status = 'unsupported'; render(); return; }
   voiceMode = mode;
   voiceHolding = true;
   voice.finished = false; voice.carry = ''; voice.finalText = ''; voice.interimText = '';
-  voice.lastAlts = null; voice.restarts = 0; voice.msg = '';
+  voice.lastAlts = null; voice.restarts = 0; voice.msg = ''; voice.errCode = '';
   voiceUI('prep', '');
+  if(voiceMaxTimer) clearTimeout(voiceMaxTimer);
+  voiceMaxTimer = setTimeout(()=>{ if(voiceHolding) voiceHoldEnd(); }, 15000); // seguridad: máximo 15 s
   voiceBeginRec(SR);
 }
 
@@ -520,7 +541,7 @@ function voiceBeginRec(SR){
     const rec = new SR();
     const nl = (navigator.language || '').toLowerCase();
     rec.lang = nl.indexOf('es')===0 ? navigator.language : 'es-ES';
-    rec.continuous = true;
+    rec.continuous = !IS_IOS;          // en iPhone funciona mejor por tramos; se reinicia solo mientras sigas
     rec.interimResults = true;
     rec.maxAlternatives = 3;
     rec.onstart = rec.onaudiostart = ()=>{ if(voice && voiceHolding) voiceUI('live', null); };
@@ -539,23 +560,23 @@ function voiceBeginRec(SR){
     };
     rec.onerror = (e)=>{
       if(!voice || voice.finished) return;
-      const code = e && e.error;
+      const code = (e && e.error) || 'desconocido';
+      voice.errCode = code;
       if(code==='not-allowed' || code==='service-not-allowed'){
         if(voice.restarts>0) voiceFinish(); else voiceFinish('denied');
       } else if(code==='no-speech' || code==='aborted'){
-        /* sigue: se reinicia en onend mientras se mantenga presionado */
+        /* sigue: se reinicia en onend mientras se mantenga la escucha */
       } else {
         voiceFinish('error');
       }
     };
     rec.onend = ()=>{
       if(!voice || voice.finished) return;
-      if(voiceHolding && voice.restarts < 8){
-        // el sistema cortó la escucha por un silencio: seguir escuchando mientras siga presionado
+      if(voiceHolding && voice.restarts < 12){
         voice.carry = (voice.carry||'') + (voice.finalText || voice.interimText || '') + ' ';
         voice.finalText = ''; voice.interimText = ''; voice.restarts++;
         voiceRec = null;
-        voiceBeginRec(SR);
+        voiceBeginRec(SR);   // el sistema cortó por un silencio: seguir escuchando
       } else {
         voiceFinish();
       }
@@ -563,13 +584,15 @@ function voiceBeginRec(SR){
     voiceRec = rec;
     rec.start();
   }catch(err){
-    voiceFinish('unsupported');
+    if(voice) voice.errCode = (err && err.name) || 'start';
+    voiceFinish('error');
   }
 }
 
 function voiceHoldEnd(){
   if(!voiceHolding || !voice) return;
   voiceHolding = false;
+  if(voiceMaxTimer){ clearTimeout(voiceMaxTimer); voiceMaxTimer = null; }
   voiceUI('proc', null);
   if(voiceRec){ try{ voiceRec.stop(); }catch(e){} }
   if(voiceTimer) clearTimeout(voiceTimer);
@@ -582,6 +605,7 @@ function voiceFinish(forceStatus){
   const rec = voiceRec;
   voiceRec = null; voiceHolding = false;
   if(voiceTimer){ clearTimeout(voiceTimer); voiceTimer = null; }
+  if(voiceMaxTimer){ clearTimeout(voiceMaxTimer); voiceMaxTimer = null; }
   if(rec){ try{ rec.onresult = rec.onerror = rec.onend = rec.onstart = rec.onaudiostart = null; rec.abort(); }catch(e){} }
   if(forceStatus){ voice.status = forceStatus; render(); return; }
   const text = ((voice.carry||'') + (voice.finalText||'') + (voice.interimText||'')).replace(/\s+/g,' ').trim();
@@ -593,7 +617,7 @@ function voiceFinish(forceStatus){
   voice.value = val;
   voice.draft = undefined;
   voice.status = 'result';
-  voice.msg = text ? '' : 'No te escuché. Mantén presionado el botón y habla.';
+  voice.msg = text ? '' : 'No te escuché. Toca el botón, espera a que diga "Escuchando…" y habla.';
   render();
 }
 
@@ -624,26 +648,25 @@ function renderVoice(){
   const canHold = st!=='unsupported' && st!=='denied';
   const hasResult = st==='result';
   let msg;
-  if(st==='unsupported') msg = 'Este navegador no permite dictado desde aquí. Toca el campo de abajo y usa el micrófono 🎤 del teclado del teléfono, o escribe el número.';
-  else if(st==='denied') msg = 'No hay permiso para usar el micrófono. Puedes activarlo en los ajustes del navegador, o usar el micrófono 🎤 del teclado en el campo de abajo.';
-  else if(st==='error') msg = 'No se pudo usar el dictado ahora. Prueba de nuevo, o escribe el número.';
+  if(st==='unsupported') msg = 'Este navegador no permite dictado desde aquí. Usa el botón ⌨️ de abajo y el micrófono 🎤 del teclado, o escribe el número.';
+  else if(st==='denied') msg = 'El iPhone no dejó usar el dictado de voz aquí. Revisa en Ajustes: General → Teclado → “Activar dictado”, y Privacidad y seguridad → Micrófono y Reconocimiento de voz → Safari. Si usas el icono de la pantalla de inicio, prueba abriendo la página en Safari. Mientras tanto, usa el botón ⌨️ de abajo.';
+  else if(st==='error') msg = `No se pudo usar el dictado (${esc(voice.errCode||'error')}). Prueba otra vez o usa el botón ⌨️ de abajo.`;
   else if(hasResult){
     if(voice.value!==null) msg = `Dijiste: “${esc(voice.transcript)}”`;
     else msg = voice.msg ? esc(voice.msg) : (voice.transcript ? `No entendí “${esc(voice.transcript)}”. Inténtalo de nuevo.` : 'No entendí el número.');
-  } else msg = 'Mantén presionado el botón, di el puntaje y suéltalo. Ej: “ciento quince” o “menos cincuenta”.';
+  } else msg = 'Toca el botón una vez para empezar y otra para terminar, o mantenlo presionado mientras hablas. Ej: “ciento quince” o “menos cincuenta”.';
   const shown = voice.draft!==undefined ? voice.draft : (voice.value===null ? '' : String(voice.value));
   return `<div class="calc" style="margin-top:6px;">
     <div style="font-weight:700;margin-bottom:6px;">Puntaje de ${name}</div>
     <div class="subtitle" style="margin-bottom:10px;">${msg}</div>
     ${canHold ? `
-    <button id="voice-hold" class="hold-btn" onpointerdown="voiceHoldStart(event)" oncontextmenu="return false;">🎤 ${hasResult?'Mantén presionado para volver a dictar':'Mantén presionado y habla'}</button>
-    <div id="voice-heard" class="subtitle" style="text-align:center;min-height:18px;margin-top:6px;"></div>
-    <div style="text-align:center;"><button id="voice-toggle" class="link-btn" onclick="voiceToggle()">o toca aquí para empezar y toca otra vez para terminar</button></div>` : ''}
+    <button id="voice-hold" class="hold-btn" onpointerdown="voiceHoldStart(event)" oncontextmenu="return false;">🎤 ${hasResult?'Volver a dictar':'Toca o mantén presionado y habla'}</button>
+    <div id="voice-heard" class="subtitle" style="text-align:center;min-height:18px;margin-top:6px;"></div>` : ''}
+    <button class="btn btn-outline" style="width:100%;margin-top:6px;" onclick="voiceKeyboard()">⌨️ Dictar con el teclado del teléfono</button>
     <div class="calc-manual" style="margin-top:12px;">
       <label>Puntaje:</label>
       <input id="voice-input" type="text" inputmode="text" autocomplete="off" placeholder="—" value="${esc(shown)}" oninput="voiceDraft(this.value)" style="font-size:20px;font-weight:800;text-align:center;">
     </div>
-    <div class="subtitle" style="margin-top:4px;">¿No capta la voz? Toca el campo y usa el micrófono 🎤 del teclado.</div>
     ${voice.msg && hasResult && voice.value!==null ? `<div class="subtitle" style="margin-top:6px;">${esc(voice.msg)}</div>` : ''}
     <div class="calc-actions" style="margin-top:12px;">
       <button class="btn btn-outline" onclick="cancelVoice()">Cancelar</button>
@@ -652,9 +675,11 @@ function renderVoice(){
   </div>`;
 }
 
-/* Al soltar el dedo en cualquier parte, termina el dictado (modo "mantener presionado") */
-['pointerup','pointercancel','touchend','touchcancel','mouseup'].forEach(t=>{
-  window.addEventListener(t, ()=>{ if(voiceMode==='hold') voiceHoldEnd(); }, {passive:true});
+['pointerup','touchend','mouseup'].forEach(t=>{
+  window.addEventListener(t, ()=>voiceRelease('up'), {passive:true});
+});
+['pointercancel','touchcancel'].forEach(t=>{
+  window.addEventListener(t, ()=>voiceRelease('cancel'), {passive:true});
 });
 document.addEventListener('visibilitychange', ()=>{ if(document.hidden && voiceHolding) voiceHoldEnd(); });
 
